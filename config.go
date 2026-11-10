@@ -4,16 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
-	"strconv"
-	"strings"
 
 	"tailscale.com/ipn/store/mem"
 	"tailscale.com/tsnet"
-)
-
-const (
-	defaultPort = 8080
 )
 
 type serveConfig struct {
@@ -44,23 +39,24 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.TextVar(&c.logLevel, "log-level", slog.LevelInfo, "Log level to use")
 }
 
-func (c *serveConfig) servePort(logger *slog.Logger, destination string) int {
-	if c.port > 0 {
-		return c.port
-	}
-
-	parts := strings.Split(destination, ":")
-
-	if len(parts) != 2 {
-		return defaultPort
-	}
-
-	port, err := strconv.Atoi(parts[1])
+// servePort validates destination and returns the port to listen on in the
+// tailnet: the -port flag if set, otherwise the destination's port.
+func (c *serveConfig) servePort(destination string) (int, error) {
+	_, destPort, err := net.SplitHostPort(destination)
 	if err != nil {
-		logger.Warn(fmt.Sprintf("Can't parse '%s' port", destination))
-		return defaultPort
+		return 0, fmt.Errorf("invalid destination %q, expected host:port: %w", destination, err)
 	}
-	return port
+	port, err := net.LookupPort("tcp", destPort)
+	if err != nil || port == 0 {
+		return 0, fmt.Errorf("invalid destination port %q", destPort)
+	}
+	if c.port != 0 {
+		if c.port < 1 || c.port > 65535 {
+			return 0, fmt.Errorf("invalid -port %d, must be between 1 and 65535", c.port)
+		}
+		return c.port, nil
+	}
+	return port, nil
 }
 
 func (c *serveConfig) createServer() (*tsnet.Server, error) {

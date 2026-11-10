@@ -74,6 +74,11 @@ func main() {
 		os.Exit(1)
 	}
 	destination := fs.Arg(0)
+	port, err := cfg.servePort(destination)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	srv, err := cfg.createServer()
 	if err != nil {
@@ -82,7 +87,6 @@ func main() {
 	}
 
 	logger := cfg.logger()
-	port := cfg.servePort(logger, destination)
 
 	// Stop on Ctrl+C and on SIGTERM (what Docker and Kubernetes send).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

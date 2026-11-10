@@ -40,6 +40,9 @@ Examples:
 Options:
 `
 
+// webUIPort is the tailnet port of the Tailscale web interface (-webui).
+const webUIPort = 5252
+
 // stringList is a flag.Value collecting every use of a repeatable flag.
 type stringList []string
 
@@ -58,6 +61,7 @@ type serveConfig struct {
 
 	shutdownTimeout time.Duration
 	healthAddr      string
+	webUI           bool
 	logLevel        slog.Level
 	local           stringList
 
@@ -81,6 +85,7 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.upTimeout, "up-timeout", time.Minute, "How long to wait for the device to connect to the tailnet before exiting. 0 waits forever")
 	fs.DurationVar(&c.shutdownTimeout, "shutdown-timeout", 5*time.Second, "On shutdown, how long to wait for open connections to finish before closing them. A second signal exits immediately")
 	fs.StringVar(&c.healthAddr, "health-addr", "", "Address to serve HTTP health checks on, e.g. 127.0.0.1:9002: /healthz (process is up) and /readyz (proxy is listening and connected to the tailnet). Disabled if empty")
+	fs.BoolVar(&c.webUI, "webui", false, fmt.Sprintf("Run the Tailscale web interface for this device on tailnet port %d", webUIPort))
 	fs.BoolVar(&c.noLogUpload, "no-log-upload", false, "Don't upload tailscale logs to Tailscale. Tailscale can't provide support for devices that opt out")
 	fs.TextVar(&c.logLevel, "log-level", slog.LevelInfo, "Log level to use (debug, info, warn, error). Tailscale's internal logs are shown at debug")
 }
@@ -97,6 +102,8 @@ func (c *serveConfig) createServer(log *slog.Logger) (*tsnet.Server, error) {
 		Dir:        c.storageDir,
 		ControlURL: c.controlURL,
 		Ephemeral:  c.ephemeral(),
+
+		RunWebClient: c.webUI,
 		// Messages for the user, like the node's state or a login URL.
 		UserLogf: slogf(log, slog.LevelInfo),
 	}
@@ -127,6 +134,15 @@ func (c *serveConfig) createServer(log *slog.Logger) (*tsnet.Server, error) {
 	}
 
 	return srv, nil
+}
+
+// reservedPorts returns the tailnet ports used by the device itself, which
+// mappings can't listen on.
+func (c *serveConfig) reservedPorts() map[int]string {
+	if c.webUI {
+		return map[int]string{webUIPort: "-webui"}
+	}
+	return nil
 }
 
 // resolveAuthKey returns the authkey from -authkey, -authkey-file or the

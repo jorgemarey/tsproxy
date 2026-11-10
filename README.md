@@ -60,6 +60,10 @@ $ tsproxy --hostname plex --dir /var/lib/tsproxy/plex 80=127.0.0.1:32400
 
 Each proxy instance needs its own state directory.
 
+## Web interface
+
+`-webui` runs the Tailscale web interface for the device on tailnet port 5252 (`http://<hostname>:5252`), where tailnet users can see its status and manage it. Access follows your tailnet's access rules, and changes require re-authenticating. Mappings can't use port 5252 while it's enabled.
+
 ## Logging
 
 All output is structured (`log/slog` text format) on stderr. `-log-level` sets the level (`debug`, `info`, `warn`, `error`). Tailscale's own status messages are logged at `info` and its verbose internal logs at `debug`, both tagged with `component=tailscale`.

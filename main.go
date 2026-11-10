@@ -109,7 +109,7 @@ func main() {
 		fs.Usage()
 		os.Exit(1)
 	}
-	mappings, err := parseMappings(args, cfg.local)
+	mappings, err := parseMappings(args, cfg.local, cfg.reservedPorts())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

@@ -167,8 +167,9 @@ func parseOutbound(s string) (mapping, error) {
 }
 
 // parseMappings parses inbound and outbound mapping specs and checks that no
-// two of them listen on the same address.
-func parseMappings(inboundSpecs, outboundSpecs []string) ([]mapping, error) {
+// two of them listen on the same address. reservedPorts are tailnet ports
+// already in use by the device itself.
+func parseMappings(inboundSpecs, outboundSpecs []string, reservedPorts map[int]string) ([]mapping, error) {
 	var mappings []mapping
 	for _, s := range inboundSpecs {
 		m, err := parseInbound(s)
@@ -187,6 +188,11 @@ func parseMappings(inboundSpecs, outboundSpecs []string) ([]mapping, error) {
 
 	seen := map[string]mapping{}
 	for _, m := range mappings {
+		if m.dir == inbound {
+			if owner, ok := reservedPorts[endpointPort(m.listen)]; ok {
+				return nil, fmt.Errorf("mapping %q uses tailnet port %d, which is used by %s", m, endpointPort(m.listen), owner)
+			}
+		}
 		key := fmt.Sprintf("%d %s", m.dir, m.listen)
 		if prev, ok := seen[key]; ok {
 			return nil, fmt.Errorf("mappings %q and %q listen on the same address", prev, m)

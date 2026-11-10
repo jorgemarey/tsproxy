@@ -88,9 +88,12 @@ func TestParseMappingsDuplicates(t *testing.T) {
 	tests := []struct {
 		name         string
 		in, out      []string
+		reserved     map[int]string
 		wantErr      bool
 		wantMappings int
 	}{
+		{name: "reserved tailnet port", in: []string{"5252=127.0.0.1:80"}, reserved: map[int]string{5252: "-webui"}, wantErr: true},
+		{name: "reserved port is free locally", out: []string{"5252=db:5432"}, reserved: map[int]string{5252: "-webui"}, wantMappings: 1},
 		{name: "distinct", in: []string{"80=127.0.0.1:8080", "443=127.0.0.1:8080,tls"}, out: []string{"db:5432"}, wantMappings: 3},
 		{name: "same tailnet and local port", in: []string{"127.0.0.1:5432"}, out: []string{"db:5432"}, wantMappings: 2},
 		{name: "same tailnet port", in: []string{"80=127.0.0.1:8080", "127.0.0.1:80"}, wantErr: true},
@@ -99,7 +102,7 @@ func TestParseMappingsDuplicates(t *testing.T) {
 		{name: "same local socket", out: []string{"unix:/tmp/a.sock=db:5432", "unix:/tmp/a.sock=other:6379"}, wantErr: true},
 	}
 	for _, tt := range tests {
-		got, err := parseMappings(tt.in, tt.out)
+		got, err := parseMappings(tt.in, tt.out, tt.reserved)
 		if tt.wantErr != (err != nil) || len(got) != tt.wantMappings {
 			t.Errorf("%s: parseMappings() = %d mappings, %v; want %d mappings, error %v", tt.name, len(got), err, tt.wantMappings, tt.wantErr)
 		}

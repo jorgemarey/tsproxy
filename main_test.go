@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -70,5 +72,41 @@ func TestHandleConnHalfClose(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("handleConn did not return")
+	}
+}
+
+// flakyListener fails Accept a few times with a non-close error, then reports
+// itself closed.
+type flakyListener struct {
+	net.Listener
+	failures int
+	calls    int
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	l.calls++
+	if l.calls <= l.failures {
+		return nil, errors.New("temporary failure")
+	}
+	return nil, fmt.Errorf("wrapped: %w", net.ErrClosed)
+}
+
+// TestServeStopsOnClose checks that serve retries other accept errors and
+// returns once the listener is closed instead of looping forever.
+func TestServeStopsOnClose(t *testing.T) {
+	ln := &flakyListener{failures: 3}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serve(slog.New(slog.DiscardHandler), ln, "127.0.0.1:1")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after the listener was closed")
+	}
+	if ln.calls != ln.failures+1 {
+		t.Fatalf("Accept called %d times, want %d", ln.calls, ln.failures+1)
 	}
 }

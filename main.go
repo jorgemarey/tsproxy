@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"time"
 )
 
 func handleConn(logger *slog.Logger, in net.Conn, destination string) {
@@ -87,12 +88,32 @@ func main() {
 	defer ln.Close()
 
 	logger.Info(fmt.Sprintf("Proxy server is running on address %s", ln.Addr().String()))
+	serve(logger, ln, destination)
+}
+
+const maxAcceptDelay = time.Second
+
+// serve accepts connections on ln and proxies them to destination. It returns
+// once ln is closed. Other accept errors are retried with exponential backoff
+// so a persistent failure doesn't turn into a busy loop.
+func serve(logger *slog.Logger, ln net.Listener, destination string) {
+	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			logger.Warn("Can't accept connection", "error", err)
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if delay == 0 {
+				delay = 5 * time.Millisecond
+			} else {
+				delay = min(2*delay, maxAcceptDelay)
+			}
+			logger.Warn("Can't accept connection", "error", err, "retry_in", delay)
+			time.Sleep(delay)
 			continue
 		}
+		delay = 0
 		thisLogger := logger.With("source", conn.RemoteAddr().String())
 		go handleConn(thisLogger, conn, destination)
 	}

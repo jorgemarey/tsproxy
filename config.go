@@ -4,15 +4,44 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
+	"strings"
 
 	"tailscale.com/ipn/store/mem"
 	"tailscale.com/tsnet"
 )
 
+const usage = `Usage: tsproxy [options] [MAPPING...]
+
+Exposes local services on the tailnet (MAPPING arguments) and tailnet
+services locally (-local options). At least one mapping is required.
+
+MAPPING, from the tailnet to a local service: [PORT=]DEST[,tls]
+  DEST is HOST:PORT or unix:/path/to.sock. PORT is the port on the tailnet;
+  it defaults to DEST's port and is required for unix sockets. With ",tls"
+  the port serves TLS using the device's Tailscale certificate (HTTPS and
+  MagicDNS must be enabled in the tailnet).
+
+-local, from a local listener to a tailnet service: [LISTEN=]HOST:PORT
+  HOST:PORT is an address on the tailnet. LISTEN is a PORT (bound to
+  127.0.0.1), HOST:PORT or unix:/path/to.sock; it defaults to 127.0.0.1
+  and the tailnet port.
+
+Examples:
+  tsproxy -hostname plex 127.0.0.1:32400
+  tsproxy -hostname web 80=127.0.0.1:8080 443=127.0.0.1:8080,tls 9000=unix:/run/app.sock
+  tsproxy -hostname app -local 5432=db:5432 -local unix:/tmp/redis.sock=cache:6379
+
+Options:
+`
+
+// stringList is a flag.Value collecting every use of a repeatable flag.
+type stringList []string
+
+func (l *stringList) String() string     { return strings.Join(*l, ", ") }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
+
 type serveConfig struct {
-	port        int
 	version     bool
 	hostname    string
 	authKey     string
@@ -20,6 +49,7 @@ type serveConfig struct {
 	controlURL  string
 	disableLogs bool
 	logLevel    slog.Level
+	local       stringList
 
 	// tempDir is the temporary tsnet directory used by ephemeral nodes. It is
 	// removed by cleanup.
@@ -28,10 +58,10 @@ type serveConfig struct {
 
 func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: tsproxy [options] destination\n")
+		fmt.Fprint(fs.Output(), usage)
 		fs.PrintDefaults()
 	}
-	fs.IntVar(&c.port, "port", 0, "Port where the service will be available on the tailnet")
+	fs.Var(&c.local, "local", "Expose a tailnet service locally: [LISTEN=]HOST:PORT. Can be repeated")
 	fs.BoolVar(&c.version, "version", false, "Prints program version")
 	fs.StringVar(&c.hostname, "hostname", "", "Name for the device this proxy represents")
 	fs.StringVar(&c.authKey, "authkey", "", "Tailscale device authkey (defaults to the TS_AUTHKEY environment variable)")
@@ -39,26 +69,6 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.controlURL, "control-url", "", "Set if the coordination server is not the default")
 	fs.BoolVar(&c.disableLogs, "disable-ts-logs", false, "Set to disable tailscale logs")
 	fs.TextVar(&c.logLevel, "log-level", slog.LevelInfo, "Log level to use")
-}
-
-// servePort validates destination and returns the port to listen on in the
-// tailnet: the -port flag if set, otherwise the destination's port.
-func (c *serveConfig) servePort(destination string) (int, error) {
-	_, destPort, err := net.SplitHostPort(destination)
-	if err != nil {
-		return 0, fmt.Errorf("invalid destination %q, expected host:port: %w", destination, err)
-	}
-	port, err := net.LookupPort("tcp", destPort)
-	if err != nil || port == 0 {
-		return 0, fmt.Errorf("invalid destination port %q", destPort)
-	}
-	if c.port != 0 {
-		if c.port < 1 || c.port > 65535 {
-			return 0, fmt.Errorf("invalid -port %d, must be between 1 and 65535", c.port)
-		}
-		return c.port, nil
-	}
-	return port, nil
 }
 
 func (c *serveConfig) createServer() (*tsnet.Server, error) {

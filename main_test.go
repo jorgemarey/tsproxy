@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"testing"
 	"time"
 )
@@ -48,7 +51,7 @@ func TestHandleConnHalfClose(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleConn(slog.New(slog.DiscardHandler), c, dst.Addr().String())
+		handleConn(slog.New(slog.DiscardHandler), c, tcpDialer(dst.Addr().String()))
 	}()
 
 	client, err := net.Dial("tcp", front.Addr().String())
@@ -98,7 +101,7 @@ func TestServeStopsOnClose(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		serve(slog.New(slog.DiscardHandler), ln, "127.0.0.1:1")
+		serve(slog.New(slog.DiscardHandler), ln, tcpDialer("127.0.0.1:1"))
 	}()
 
 	select {
@@ -108,5 +111,39 @@ func TestServeStopsOnClose(t *testing.T) {
 	}
 	if ln.calls != ln.failures+1 {
 		t.Fatalf("Accept called %d times, want %d", ln.calls, ln.failures+1)
+	}
+}
+
+func tcpDialer(addr string) dialFunc {
+	return func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}
+}
+
+func TestParseArgs(t *testing.T) {
+	tests := []struct {
+		args      []string
+		wantPos   []string
+		wantLocal []string
+	}{
+		{args: []string{"a:1"}, wantPos: []string{"a:1"}},
+		{args: []string{"-local", "db:5432", "a:1"}, wantPos: []string{"a:1"}, wantLocal: []string{"db:5432"}},
+		{args: []string{"a:1", "-local", "db:5432", "b:2", "-local=c:3"}, wantPos: []string{"a:1", "b:2"}, wantLocal: []string{"db:5432", "c:3"}},
+		{args: []string{"a:1", "--", "-local", "b:2"}, wantPos: []string{"a:1", "-local", "b:2"}},
+		{args: []string{}, wantPos: nil},
+	}
+	for _, tt := range tests {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		cfg := &serveConfig{}
+		cfg.configureByFlags(fs)
+		got, err := parseArgs(fs, tt.args)
+		if err != nil {
+			t.Errorf("parseArgs(%q): %v", tt.args, err)
+			continue
+		}
+		if !slices.Equal(got, tt.wantPos) || !slices.Equal([]string(cfg.local), tt.wantLocal) {
+			t.Errorf("parseArgs(%q) = %q, local %q; want %q, local %q", tt.args, got, cfg.local, tt.wantPos, tt.wantLocal)
+		}
 	}
 }

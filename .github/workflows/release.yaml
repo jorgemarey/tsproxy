@@ -10,18 +10,22 @@ jobs:
       contents: write
     strategy:
       matrix:
-        # build and publish in parallel: linux/amd64, windows/amd64, darwin/amd64 
+        # build and publish in parallel for every goos/goarch combination
         goos: [linux, windows, darwin]
-        goarch: [amd64]
+        goarch: [amd64, arm64]
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Set env
       run: echo "RELEASE_TAG=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
-    - uses: wangyoucao577/go-release-action@v1.40
+    - uses: wangyoucao577/go-release-action@v1.55
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         goos: ${{ matrix.goos }}
         goarch: ${{ matrix.goarch }}
+        # use the Go version required by go.mod
+        goversion: ./go.mod
+        # strip debug information to reduce the binary size
+        ldflags: -s -w
         binary_name: tsproxy
         asset_name: tsproxy-${{ env.RELEASE_TAG }}-${{ matrix.goos }}-${{ matrix.goarch }}

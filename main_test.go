@@ -101,7 +101,7 @@ func TestServeStopsOnClose(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		serve(slog.New(slog.DiscardHandler), ln, tcpDialer("127.0.0.1:1"))
+		serve(slog.New(slog.DiscardHandler), ln, tcpDialer("127.0.0.1:1"), &connTracker{})
 	}()
 
 	select {
@@ -145,5 +145,27 @@ func TestParseArgs(t *testing.T) {
 		if !slices.Equal(got, tt.wantPos) || !slices.Equal([]string(cfg.local), tt.wantLocal) {
 			t.Errorf("parseArgs(%q) = %q, local %q; want %q, local %q", tt.args, got, cfg.local, tt.wantPos, tt.wantLocal)
 		}
+	}
+}
+
+// TestConnTrackerWait checks that shutdown waits for open connections and
+// gives up after the timeout.
+func TestConnTrackerWait(t *testing.T) {
+	var conns connTracker
+	release := make(chan struct{})
+	conns.goHandle(func() { <-release })
+
+	if n := conns.active(); n != 1 {
+		t.Fatalf("active() = %d, want 1", n)
+	}
+	if conns.wait(50 * time.Millisecond) {
+		t.Fatal("wait() returned true with a connection still open")
+	}
+	close(release)
+	if !conns.wait(5 * time.Second) {
+		t.Fatal("wait() returned false after the connection finished")
+	}
+	if n := conns.active(); n != 0 {
+		t.Fatalf("active() = %d, want 0", n)
 	}
 }

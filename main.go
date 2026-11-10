@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -175,18 +176,64 @@ func main() {
 
 	go func() {
 		<-ctx.Done()
+		// Restore the default signal handling so a second signal exits
+		// immediately instead of waiting for connections to finish.
+		stop()
 		logger.Info("Shutting down")
 		closeListeners()
 	}()
 
+	var conns connTracker
 	var wg sync.WaitGroup
 	for i, m := range mappings {
 		mLogger := logger.With("mapping", m.String())
 		mLogger.Info("Proxy is listening")
-		wg.Go(func() { serve(mLogger, listeners[i], dialer(srv, m)) })
+		wg.Go(func() { serve(mLogger, listeners[i], dialer(srv, m), &conns) })
 	}
 	wg.Wait()
+
+	if n := conns.active(); n > 0 {
+		logger.Info("Waiting for open connections to finish", "connections", n, "timeout", cfg.shutdownTimeout)
+		if !conns.wait(cfg.shutdownTimeout) {
+			logger.Warn("Closing connections still open after the shutdown timeout", "connections", conns.active())
+		}
+	}
 	shutdown(logger, cfg, srv)
+}
+
+// connTracker tracks the connections being proxied so shutdown can wait for
+// them to finish.
+type connTracker struct {
+	wg sync.WaitGroup
+	n  atomic.Int64
+}
+
+// goHandle runs f in a new goroutine, tracking it as an open connection.
+func (t *connTracker) goHandle(f func()) {
+	t.n.Add(1)
+	t.wg.Go(func() {
+		defer t.n.Add(-1)
+		f()
+	})
+}
+
+// active returns the number of open connections.
+func (t *connTracker) active() int64 { return t.n.Load() }
+
+// wait waits up to timeout for all connections to finish and reports
+// whether they did.
+func (t *connTracker) wait(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		t.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // shutdown disconnects from the tailnet. Ephemeral nodes log out first so the
@@ -216,7 +263,7 @@ const maxAcceptDelay = time.Second
 // serve accepts connections on ln and proxies them using dial. It returns
 // once ln is closed. Other accept errors are retried with exponential backoff
 // so a persistent failure doesn't turn into a busy loop.
-func serve(logger *slog.Logger, ln net.Listener, dial dialFunc) {
+func serve(logger *slog.Logger, ln net.Listener, dial dialFunc, conns *connTracker) {
 	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
@@ -235,6 +282,6 @@ func serve(logger *slog.Logger, ln net.Listener, dial dialFunc) {
 		}
 		delay = 0
 		thisLogger := logger.With("source", conn.RemoteAddr().String())
-		go handleConn(thisLogger, conn, dial)
+		conns.goHandle(func() { handleConn(thisLogger, conn, dial) })
 	}
 }

@@ -55,8 +55,10 @@ type serveConfig struct {
 	controlURL  string
 	noLogUpload bool
 	upTimeout   time.Duration
-	logLevel    slog.Level
-	local       stringList
+
+	shutdownTimeout time.Duration
+	logLevel        slog.Level
+	local           stringList
 
 	// tempDir is the temporary tsnet directory used by ephemeral nodes. It is
 	// removed by cleanup.
@@ -76,6 +78,7 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.storageDir, "dir", "", "State storage directory. If set, the device is persistent and keeps its identity across restarts. If not, it is ephemeral and removed from the tailnet on shutdown")
 	fs.StringVar(&c.controlURL, "control-url", "", "Set if the coordination server is not the default")
 	fs.DurationVar(&c.upTimeout, "up-timeout", time.Minute, "How long to wait for the device to connect to the tailnet before exiting. 0 waits forever")
+	fs.DurationVar(&c.shutdownTimeout, "shutdown-timeout", 5*time.Second, "On shutdown, how long to wait for open connections to finish before closing them. A second signal exits immediately")
 	fs.BoolVar(&c.noLogUpload, "no-log-upload", false, "Don't upload tailscale logs to Tailscale. Tailscale can't provide support for devices that opt out")
 	fs.TextVar(&c.logLevel, "log-level", slog.LevelInfo, "Log level to use (debug, info, warn, error). Tailscale's internal logs are shown at debug")
 }

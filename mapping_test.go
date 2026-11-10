@@ -132,7 +132,7 @@ func TestUnixSocketProxy(t *testing.T) {
 	}
 	defer front.Close()
 	m := mapping{dir: inbound, dest: endpoint{"unix", dstPath}}
-	go serve(slog.New(slog.DiscardHandler), front, dialer(nil, m))
+	go serve(slog.New(slog.DiscardHandler), front, dialer(nil, m), &connTracker{})
 
 	client, err := net.Dial("unix", frontPath)
 	if err != nil {

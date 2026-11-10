@@ -36,7 +36,7 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.IntVar(&c.port, "port", 0, "Port where the service will be available on the tailnet")
 	fs.BoolVar(&c.version, "version", false, "Prints program version")
 	fs.StringVar(&c.hostname, "hostname", "", "Name for the device this proxy represents")
-	fs.StringVar(&c.authKey, "authkey", os.Getenv("TS_AUTHKEY"), "Tailscale device authkey")
+	fs.StringVar(&c.authKey, "authkey", "", "Tailscale device authkey (defaults to the TS_AUTHKEY environment variable)")
 	fs.StringVar(&c.storageDir, "dir", "", "State storage directory")
 	fs.StringVar(&c.controlURL, "control-url", "", "Set if the coordination server is not the default")
 	fs.BoolVar(&c.ephemeral, "ephemeral", false, "Set to configure this proxy as an ephemeral device")
@@ -64,6 +64,11 @@ func (c *serveConfig) servePort(logger *slog.Logger, destination string) int {
 }
 
 func (c *serveConfig) createServer() (*tsnet.Server, error) {
+	// The env var is read here rather than used as the flag default so the
+	// key is never printed by the usage/help output.
+	if c.authKey == "" {
+		c.authKey = os.Getenv("TS_AUTHKEY")
+	}
 	if c.authKey == "" {
 		return nil, fmt.Errorf("an authkey must be provided")
 	}

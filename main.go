@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -38,51 +37,6 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 		positional = append(positional, rest[0])
 		args = rest[1:]
 	}
-}
-
-// dialTimeout bounds how long connecting to a destination can take.
-const dialTimeout = 10 * time.Second
-
-func handleConn(logger *slog.Logger, in net.Conn, dial dialFunc) {
-	logger.Debug("Accepted and handling incoming connection")
-	defer logger.Debug("Closed incoming connection")
-	defer in.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
-	out, err := dial(ctx)
-	cancel()
-	if err != nil {
-		logger.Error("Dial destination failed", "error", err)
-		return
-	}
-	defer out.Close()
-
-	errCh := make(chan error, 2)
-	go proxy(out, in, errCh)
-	go proxy(in, out, errCh)
-	// Wait for both directions: one side finishing its writes (half-close)
-	// must not cut off data still flowing the other way.
-	for range 2 {
-		if err := <-errCh; err != nil && !errors.Is(err, net.ErrClosed) {
-			logger.Warn("Unexpected error when forwarding data", "error", err)
-		}
-	}
-}
-
-// proxy copies src into dst. When src reaches EOF the write side of dst is
-// closed so the peer sees the EOF too, while dst can keep sending data back.
-func proxy(dst, src net.Conn, errCh chan<- error) {
-	_, err := io.Copy(dst, src)
-	if err != nil {
-		// Abort the whole connection so the other direction doesn't hang.
-		dst.Close()
-		src.Close()
-	} else if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-		cw.CloseWrite()
-	} else {
-		dst.Close()
-	}
-	errCh <- err
 }
 
 func main() {

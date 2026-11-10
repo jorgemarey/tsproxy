@@ -60,7 +60,11 @@ func main() {
 	cfg.configureByFlags(fs)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
-		os.Exit(1)
+		// The flag package has already printed the error and usage.
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		os.Exit(2)
 	}
 
 	if cfg.version {
@@ -82,7 +86,7 @@ func main() {
 
 	srv, err := cfg.createServer()
 	if err != nil {
-		fmt.Printf("Error creating proxy server: %s", err)
+		fmt.Fprintf(os.Stderr, "Error creating proxy server: %s\n", err)
 		os.Exit(1)
 	}
 

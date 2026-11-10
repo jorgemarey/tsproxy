@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -23,15 +24,30 @@ func handleConn(logger *slog.Logger, in net.Conn, destination string) {
 	defer out.Close()
 
 	errCh := make(chan error, 2)
-	go copy(out, in, errCh)
-	go copy(in, out, errCh)
-	if err = <-errCh; err != nil && err != io.EOF {
-		logger.Warn("Unexpectected error when forwarding data", "error", err)
+	go proxy(out, in, errCh)
+	go proxy(in, out, errCh)
+	// Wait for both directions: one side finishing its writes (half-close)
+	// must not cut off data still flowing the other way.
+	for range 2 {
+		if err := <-errCh; err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Warn("Unexpected error when forwarding data", "error", err)
+		}
 	}
 }
 
-func copy(from, to net.Conn, errCh chan<- error) {
-	_, err := io.Copy(to, from)
+// proxy copies src into dst. When src reaches EOF the write side of dst is
+// closed so the peer sees the EOF too, while dst can keep sending data back.
+func proxy(dst, src net.Conn, errCh chan<- error) {
+	_, err := io.Copy(dst, src)
+	if err != nil {
+		// Abort the whole connection so the other direction doesn't hang.
+		dst.Close()
+		src.Close()
+	} else if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	} else {
+		dst.Close()
+	}
 	errCh <- err
 }
 

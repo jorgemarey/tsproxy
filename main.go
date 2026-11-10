@@ -114,15 +114,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv, err := cfg.createServer()
+	logger := cfg.logger()
+	srv, err := cfg.createServer(logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating proxy server: %s\n", err)
 		os.Exit(1)
 	}
 
-	logger := cfg.logger()
-
-	// Stop on Ctrl+C and on SIGTERM (what Docker and Kubernetes send).
+	// Stop on Ctrl+C and on SIGTERM (what service managers and container
+	// runtimes send).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

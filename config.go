@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"strings"
 
+	"tailscale.com/envknob"
 	"tailscale.com/ipn/store/mem"
 	"tailscale.com/tsnet"
+	"tailscale.com/types/logger"
 )
 
 const usage = `Usage: tsproxy [options] [MAPPING...]
@@ -47,7 +50,7 @@ type serveConfig struct {
 	authKey     string
 	storageDir  string
 	controlURL  string
-	disableLogs bool
+	noLogUpload bool
 	logLevel    slog.Level
 	local       stringList
 
@@ -67,11 +70,11 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.authKey, "authkey", "", "Tailscale device authkey (defaults to the TS_AUTHKEY environment variable)")
 	fs.StringVar(&c.storageDir, "dir", "", "State storage directory. If set, the device is persistent and keeps its identity across restarts. If not, it is ephemeral and removed from the tailnet on shutdown")
 	fs.StringVar(&c.controlURL, "control-url", "", "Set if the coordination server is not the default")
-	fs.BoolVar(&c.disableLogs, "disable-ts-logs", false, "Set to disable tailscale logs")
-	fs.TextVar(&c.logLevel, "log-level", slog.LevelInfo, "Log level to use")
+	fs.BoolVar(&c.noLogUpload, "no-log-upload", false, "Don't upload tailscale logs to Tailscale. Tailscale can't provide support for devices that opt out")
+	fs.TextVar(&c.logLevel, "log-level", slog.LevelInfo, "Log level to use (debug, info, warn, error). Tailscale's internal logs are shown at debug")
 }
 
-func (c *serveConfig) createServer() (*tsnet.Server, error) {
+func (c *serveConfig) createServer(log *slog.Logger) (*tsnet.Server, error) {
 	// The env var is read here rather than used as the flag default so the
 	// key is never printed by the usage/help output.
 	if c.authKey == "" {
@@ -87,6 +90,16 @@ func (c *serveConfig) createServer() (*tsnet.Server, error) {
 		Dir:        c.storageDir,
 		ControlURL: c.controlURL,
 		Ephemeral:  c.ephemeral(),
+		// Messages for the user, like the node's state or a login URL.
+		UserLogf: slogf(log, slog.LevelInfo),
+	}
+	// Tailscale's backend logs are verbose, so only show them for debugging.
+	// Formatting them is skipped entirely at other levels.
+	if log.Enabled(context.Background(), slog.LevelDebug) {
+		srv.Logf = slogf(log, slog.LevelDebug)
+	}
+	if c.noLogUpload {
+		envknob.SetNoLogsNoSupport()
 	}
 
 	if srv.Ephemeral {
@@ -106,10 +119,6 @@ func (c *serveConfig) createServer() (*tsnet.Server, error) {
 		c.tempDir = dir
 	}
 
-	if c.disableLogs {
-		srv.Logf = func(string, ...any) {}
-	}
-
 	return srv, nil
 }
 
@@ -125,6 +134,14 @@ func (c *serveConfig) cleanup() error {
 		return nil
 	}
 	return os.RemoveAll(c.tempDir)
+}
+
+// slogf adapts logger to the printf-style loggers used by tailscale.
+func slogf(log *slog.Logger, level slog.Level) logger.Logf {
+	log = log.With("component", "tailscale")
+	return func(format string, args ...any) {
+		log.Log(context.Background(), level, strings.TrimSpace(fmt.Sprintf(format, args...)))
+	}
 }
 
 func (c *serveConfig) logger() *slog.Logger {

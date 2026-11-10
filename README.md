@@ -57,3 +57,9 @@ $ tsproxy --hostname plex --dir /var/lib/tsproxy/plex 80=127.0.0.1:32400
 ```
 
 Each proxy instance needs its own state directory.
+
+## Logging
+
+All output is structured (`log/slog` text format) on stderr. `-log-level` sets the level (`debug`, `info`, `warn`, `error`). Tailscale's own status messages are logged at `info` and its verbose internal logs at `debug`, both tagged with `component=tailscale`.
+
+Like the regular Tailscale client, tsproxy uploads its Tailscale logs to Tailscale for troubleshooting. Use `-no-log-upload` to opt out; Tailscale can't provide support for devices that do.

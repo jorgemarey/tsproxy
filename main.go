@@ -12,6 +12,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"tailscale.com/tsnet"
 )
 
 func handleConn(logger *slog.Logger, in net.Conn, destination string) {
@@ -99,7 +101,7 @@ func main() {
 	ln, err := srv.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		logger.Error("Can't listen on the tailnet", "error", err)
-		srv.Close()
+		shutdown(logger, cfg, srv)
 		os.Exit(1)
 	}
 
@@ -111,10 +113,28 @@ func main() {
 
 	logger.Info(fmt.Sprintf("Proxy server is running on address %s", ln.Addr().String()))
 	serve(logger, ln, destination)
+	shutdown(logger, cfg, srv)
+}
 
-	// Disconnect from the tailnet cleanly and flush tailscale logs.
+// shutdown disconnects from the tailnet. Ephemeral nodes log out first so the
+// control server removes them right away; otherwise the device lingers until
+// it times out and a restarted proxy gets a suffixed name like "plex-1".
+func shutdown(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server) {
+	if cfg.ephemeral() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if lc, err := srv.LocalClient(); err != nil {
+			logger.Warn("Can't get tailscale local client to log out", "error", err)
+		} else if err := lc.Logout(ctx); err != nil {
+			logger.Warn("Error logging out ephemeral node", "error", err)
+		}
+	}
+	// Close also flushes tailscale logs.
 	if err := srv.Close(); err != nil {
 		logger.Warn("Error shutting down tailscale", "error", err)
+	}
+	if err := cfg.cleanup(); err != nil {
+		logger.Warn("Error removing temporary directory", "error", err)
 	}
 }
 

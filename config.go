@@ -18,9 +18,12 @@ type serveConfig struct {
 	authKey     string
 	storageDir  string
 	controlURL  string
-	ephemeral   bool
 	disableLogs bool
 	logLevel    slog.Level
+
+	// tempDir is the temporary tsnet directory used by ephemeral nodes. It is
+	// removed by cleanup.
+	tempDir string
 }
 
 func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
@@ -32,9 +35,8 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&c.version, "version", false, "Prints program version")
 	fs.StringVar(&c.hostname, "hostname", "", "Name for the device this proxy represents")
 	fs.StringVar(&c.authKey, "authkey", "", "Tailscale device authkey (defaults to the TS_AUTHKEY environment variable)")
-	fs.StringVar(&c.storageDir, "dir", "", "State storage directory")
+	fs.StringVar(&c.storageDir, "dir", "", "State storage directory. If set, the device is persistent and keeps its identity across restarts. If not, it is ephemeral and removed from the tailnet on shutdown")
 	fs.StringVar(&c.controlURL, "control-url", "", "Set if the coordination server is not the default")
-	fs.BoolVar(&c.ephemeral, "ephemeral", false, "Set to configure this proxy as an ephemeral device")
 	fs.BoolVar(&c.disableLogs, "disable-ts-logs", false, "Set to disable tailscale logs")
 	fs.TextVar(&c.logLevel, "log-level", slog.LevelInfo, "Log level to use")
 }
@@ -74,21 +76,24 @@ func (c *serveConfig) createServer() (*tsnet.Server, error) {
 		AuthKey:    c.authKey,
 		Dir:        c.storageDir,
 		ControlURL: c.controlURL,
-		Ephemeral:  c.ephemeral,
+		Ephemeral:  c.ephemeral(),
 	}
 
-	if srv.Dir == "" {
-		dir, err := os.MkdirTemp(os.TempDir(), "tsproxy-state")
+	if srv.Ephemeral {
+		// The node identity lives in memory. tsnet still needs a directory for
+		// other files, so use a temporary one that cleanup removes.
+		store, err := mem.New(nil, "")
 		if err != nil {
-			return nil, fmt.Errorf("error creating temporary state directory: %s", err)
+			return nil, fmt.Errorf("error creating in-memory state store: %w", err)
+		}
+		srv.Store = store
+
+		dir, err := os.MkdirTemp("", "tsproxy-")
+		if err != nil {
+			return nil, fmt.Errorf("error creating temporary directory: %w", err)
 		}
 		srv.Dir = dir
-	}
-
-	// if ephemeral we store the configuration in memory
-	if srv.Ephemeral {
-		store, _ := mem.New(nil, "")
-		srv.Store = store
+		c.tempDir = dir
 	}
 
 	if c.disableLogs {
@@ -96,6 +101,20 @@ func (c *serveConfig) createServer() (*tsnet.Server, error) {
 	}
 
 	return srv, nil
+}
+
+// ephemeral reports whether the proxy runs as an ephemeral node. That is the
+// case unless a state directory is given.
+func (c *serveConfig) ephemeral() bool {
+	return c.storageDir == ""
+}
+
+// cleanup removes the temporary directory created for an ephemeral node.
+func (c *serveConfig) cleanup() error {
+	if c.tempDir == "" {
+		return nil
+	}
+	return os.RemoveAll(c.tempDir)
 }
 
 func (c *serveConfig) logger() *slog.Logger {

@@ -12,6 +12,19 @@ $ tsproxy --hostname plex 80=127.0.0.1:32400
 
 The authkey can also be read from a file with `-authkey-file`, which keeps it out of the process arguments and environment.
 
+### Tags and OAuth clients
+
+Devices get the tags of the authkey they register with. `-tags tag:a,tag:b` additionally advertises tags from the proxy; the control server decides whether the device can take them, based on the tag owners in your tailnet policy.
+
+The authkey can also be an [OAuth client](https://tailscale.com/kb/1215/oauth-clients) secret (`tskey-client-...`). On every start the proxy uses it to create a new single-use authkey with the tags given in `-tags`, which is then required. OAuth client secrets don't expire like authkeys do, so they are a good fit for long-running proxies. Options can be appended to the secret:
+
+- `?ephemeral=false`: the generated keys are ephemeral by default, so add this for persistent devices (`-dir`).
+- `?preauthorized=true`: skip device approval, if it's enabled in your tailnet.
+
+```
+$ tsproxy --hostname plex --tags tag:proxy --authkey-file /run/secrets/ts-oauth 80=127.0.0.1:32400
+```
+
 ## Mappings
 
 Each argument exposes a local service on the tailnet:

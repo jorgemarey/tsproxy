@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -62,6 +63,7 @@ type serveConfig struct {
 	shutdownTimeout time.Duration
 	healthAddr      string
 	webUI           bool
+	tags            string
 	logLevel        slog.Level
 	local           stringList
 
@@ -80,6 +82,7 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.hostname, "hostname", "", "Name for the device this proxy represents")
 	fs.StringVar(&c.authKey, "authkey", "", "Tailscale device authkey (defaults to the TS_AUTHKEY environment variable)")
 	fs.StringVar(&c.authKeyFile, "authkey-file", "", "File containing the Tailscale device authkey. Avoids exposing the key in the process arguments or environment")
+	fs.StringVar(&c.tags, "tags", "", "Comma-separated tags to advertise for the device, e.g. tag:proxy,tag:web. Required when the authkey is an OAuth client secret")
 	fs.StringVar(&c.storageDir, "dir", "", "State storage directory. If set, the device is persistent and keeps its identity across restarts. If not, it is ephemeral and removed from the tailnet on shutdown")
 	fs.StringVar(&c.controlURL, "control-url", "", "Set if the coordination server is not the default")
 	fs.DurationVar(&c.upTimeout, "up-timeout", time.Minute, "How long to wait for the device to connect to the tailnet before exiting. 0 waits forever")
@@ -95,6 +98,13 @@ func (c *serveConfig) createServer(log *slog.Logger) (*tsnet.Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	tags, err := parseTags(c.tags)
+	if err != nil {
+		return nil, err
+	}
+	if len(tags) == 0 && strings.HasPrefix(authKey, oauthSecretPrefix) {
+		return nil, errors.New("-tags is required when the authkey is an OAuth client secret")
+	}
 
 	srv := &tsnet.Server{
 		Hostname:   c.hostname,
@@ -103,7 +113,8 @@ func (c *serveConfig) createServer(log *slog.Logger) (*tsnet.Server, error) {
 		ControlURL: c.controlURL,
 		Ephemeral:  c.ephemeral(),
 
-		RunWebClient: c.webUI,
+		RunWebClient:  c.webUI,
+		AdvertiseTags: tags,
 		// Messages for the user, like the node's state or a login URL.
 		UserLogf: slogf(log, slog.LevelInfo),
 	}
@@ -143,6 +154,29 @@ func (c *serveConfig) reservedPorts() map[int]string {
 		return map[int]string{webUIPort: "-webui"}
 	}
 	return nil
+}
+
+// oauthSecretPrefix starts Tailscale OAuth client secrets. tsnet exchanges
+// them for a new auth key on every start, which requires tags.
+const oauthSecretPrefix = "tskey-client-"
+
+// parseTags parses a comma-separated list of tags like "tag:a, tag:b".
+func parseTags(s string) ([]string, error) {
+	var tags []string
+	for t := range strings.SplitSeq(s, ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		name, ok := strings.CutPrefix(t, "tag:")
+		if !ok || name == "" {
+			return nil, fmt.Errorf("invalid tag %q: tags must look like tag:name", t)
+		}
+		if !slices.Contains(tags, t) {
+			tags = append(tags, t)
+		}
+	}
+	return tags, nil
 }
 
 // resolveAuthKey returns the authkey from -authkey, -authkey-file or the

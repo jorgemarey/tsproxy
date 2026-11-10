@@ -10,7 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -132,19 +132,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Connect even when there are only local listeners, so the first
-	// connection doesn't have to wait for the node to start.
-	if err := srv.Start(); err != nil {
-		fail("Can't start tailscale", "error", err)
+	// Wait for the node to connect before listening, so a bad authkey or an
+	// unreachable control server fails at startup instead of on the first
+	// connection. TLS listeners also need it to get their certificate.
+	logger.Info("Connecting to the tailnet")
+	upCtx, cancelUp := ctx, context.CancelFunc(func() {})
+	if cfg.upTimeout > 0 {
+		upCtx, cancelUp = context.WithTimeout(ctx, cfg.upTimeout)
 	}
-	// TLS listeners need the node to be up to get its certificate. Wait here
-	// with ctx so a signal can still interrupt it.
-	if slices.ContainsFunc(mappings, func(m mapping) bool { return m.tls }) {
-		logger.Info("Waiting for the node to connect to the tailnet")
-		if _, err := srv.Up(ctx); err != nil {
-			fail("Can't connect to the tailnet", "error", err)
-		}
+	status, err := srv.Up(upCtx)
+	cancelUp()
+	switch {
+	case ctx.Err() != nil:
+		logger.Info("Shutting down")
+		shutdown(logger, cfg, srv)
+		return
+	case errors.Is(upCtx.Err(), context.DeadlineExceeded):
+		fail(fmt.Sprintf("Timed out after %s connecting to the tailnet", cfg.upTimeout))
+	case err != nil:
+		fail("Can't connect to the tailnet", "error", err)
 	}
+	var name string
+	if status.Self != nil {
+		name = strings.TrimSuffix(status.Self.DNSName, ".")
+	}
+	logger.Info("Connected to the tailnet", "name", name, "ips", status.TailscaleIPs)
 
 	listeners := make([]net.Listener, 0, len(mappings))
 	closeListeners := func() {

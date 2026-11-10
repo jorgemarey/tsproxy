@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"tailscale.com/envknob"
 	"tailscale.com/ipn/store/mem"
@@ -51,6 +52,7 @@ type serveConfig struct {
 	storageDir  string
 	controlURL  string
 	noLogUpload bool
+	upTimeout   time.Duration
 	logLevel    slog.Level
 	local       stringList
 
@@ -70,6 +72,7 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.authKey, "authkey", "", "Tailscale device authkey (defaults to the TS_AUTHKEY environment variable)")
 	fs.StringVar(&c.storageDir, "dir", "", "State storage directory. If set, the device is persistent and keeps its identity across restarts. If not, it is ephemeral and removed from the tailnet on shutdown")
 	fs.StringVar(&c.controlURL, "control-url", "", "Set if the coordination server is not the default")
+	fs.DurationVar(&c.upTimeout, "up-timeout", time.Minute, "How long to wait for the device to connect to the tailnet before exiting. 0 waits forever")
 	fs.BoolVar(&c.noLogUpload, "no-log-upload", false, "Don't upload tailscale logs to Tailscale. Tailscale can't provide support for devices that opt out")
 	fs.TextVar(&c.logLevel, "log-level", slog.LevelInfo, "Log level to use (debug, info, warn, error). Tailscale's internal logs are shown at debug")
 }

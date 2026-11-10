@@ -127,10 +127,28 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var health *healthServer
+	if cfg.healthAddr != "" {
+		health = newHealthServer(srv)
+	}
+	closeHealth := func() {
+		if health != nil {
+			health.close()
+		}
+	}
+
 	fail := func(msg string, args ...any) {
 		logger.Error(msg, args...)
+		closeHealth()
 		shutdown(logger, cfg, srv)
 		os.Exit(1)
+	}
+
+	// Serve health checks while connecting, so /healthz answers right away.
+	if health != nil {
+		if err := health.start(logger, cfg.healthAddr); err != nil {
+			fail("Can't serve health checks", "error", err)
+		}
 	}
 
 	// Wait for the node to connect before listening, so a bad authkey or an
@@ -146,6 +164,7 @@ func main() {
 	switch {
 	case ctx.Err() != nil:
 		logger.Info("Shutting down")
+		closeHealth()
 		shutdown(logger, cfg, srv)
 		return
 	case errors.Is(upCtx.Err(), context.DeadlineExceeded):
@@ -180,6 +199,9 @@ func main() {
 		// immediately instead of waiting for connections to finish.
 		stop()
 		logger.Info("Shutting down")
+		if health != nil {
+			health.listening.Store(false)
+		}
 		closeListeners()
 	}()
 
@@ -190,6 +212,9 @@ func main() {
 		mLogger.Info("Proxy is listening")
 		wg.Go(func() { serve(mLogger, listeners[i], dialer(srv, m), &conns) })
 	}
+	if health != nil && ctx.Err() == nil {
+		health.listening.Store(true)
+	}
 	wg.Wait()
 
 	if n := conns.active(); n > 0 {
@@ -198,6 +223,7 @@ func main() {
 			logger.Warn("Closing connections still open after the shutdown timeout", "connections", conns.active())
 		}
 	}
+	closeHealth()
 	shutdown(logger, cfg, srv)
 }
 

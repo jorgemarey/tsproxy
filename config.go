@@ -57,6 +57,7 @@ type serveConfig struct {
 	upTimeout   time.Duration
 
 	shutdownTimeout time.Duration
+	healthAddr      string
 	logLevel        slog.Level
 	local           stringList
 
@@ -79,6 +80,7 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.controlURL, "control-url", "", "Set if the coordination server is not the default")
 	fs.DurationVar(&c.upTimeout, "up-timeout", time.Minute, "How long to wait for the device to connect to the tailnet before exiting. 0 waits forever")
 	fs.DurationVar(&c.shutdownTimeout, "shutdown-timeout", 5*time.Second, "On shutdown, how long to wait for open connections to finish before closing them. A second signal exits immediately")
+	fs.StringVar(&c.healthAddr, "health-addr", "", "Address to serve HTTP health checks on, e.g. 127.0.0.1:9002: /healthz (process is up) and /readyz (proxy is listening and connected to the tailnet). Disabled if empty")
 	fs.BoolVar(&c.noLogUpload, "no-log-upload", false, "Don't upload tailscale logs to Tailscale. Tailscale can't provide support for devices that opt out")
 	fs.TextVar(&c.logLevel, "log-level", slog.LevelInfo, "Log level to use (debug, info, warn, error). Tailscale's internal logs are shown at debug")
 }

@@ -65,3 +65,16 @@ Each proxy instance needs its own state directory.
 All output is structured (`log/slog` text format) on stderr. `-log-level` sets the level (`debug`, `info`, `warn`, `error`). Tailscale's own status messages are logged at `info` and its verbose internal logs at `debug`, both tagged with `component=tailscale`.
 
 Like the regular Tailscale client, tsproxy uploads its Tailscale logs to Tailscale for troubleshooting. Use `-no-log-upload` to opt out; Tailscale can't provide support for devices that do.
+
+## Health checks
+
+`-health-addr` (e.g. `127.0.0.1:9002`) serves HTTP health checks for supervisors and load balancers:
+
+- `/healthz` answers `200` while the process is running.
+- `/readyz` answers `200` once the proxy is listening and the device is connected to the tailnet, and `503` otherwise, including while shutting down.
+
+## Startup and shutdown
+
+On startup the proxy waits for the device to connect to the tailnet before listening, and exits if that takes longer than `-up-timeout` (1 minute by default, `0` to wait forever), so a wrong authkey or an unreachable control server fails right away.
+
+On `SIGINT` or `SIGTERM` it stops accepting connections and waits up to `-shutdown-timeout` (5 seconds by default) for open connections to finish before leaving the tailnet. A second signal exits immediately.

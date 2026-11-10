@@ -10,6 +10,8 @@ $ export TS_AUTHKEY=XXX
 $ tsproxy --hostname plex 80=127.0.0.1:32400
 ```
 
+The authkey can also be read from a file with `-authkey-file`, which keeps it out of the process arguments and environment.
+
 ## Mappings
 
 Each argument exposes a local service on the tailnet:

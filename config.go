@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -49,6 +50,7 @@ type serveConfig struct {
 	version     bool
 	hostname    string
 	authKey     string
+	authKeyFile string
 	storageDir  string
 	controlURL  string
 	noLogUpload bool
@@ -70,6 +72,7 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&c.version, "version", false, "Prints program version")
 	fs.StringVar(&c.hostname, "hostname", "", "Name for the device this proxy represents")
 	fs.StringVar(&c.authKey, "authkey", "", "Tailscale device authkey (defaults to the TS_AUTHKEY environment variable)")
+	fs.StringVar(&c.authKeyFile, "authkey-file", "", "File containing the Tailscale device authkey. Avoids exposing the key in the process arguments or environment")
 	fs.StringVar(&c.storageDir, "dir", "", "State storage directory. If set, the device is persistent and keeps its identity across restarts. If not, it is ephemeral and removed from the tailnet on shutdown")
 	fs.StringVar(&c.controlURL, "control-url", "", "Set if the coordination server is not the default")
 	fs.DurationVar(&c.upTimeout, "up-timeout", time.Minute, "How long to wait for the device to connect to the tailnet before exiting. 0 waits forever")
@@ -78,18 +81,14 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 }
 
 func (c *serveConfig) createServer(log *slog.Logger) (*tsnet.Server, error) {
-	// The env var is read here rather than used as the flag default so the
-	// key is never printed by the usage/help output.
-	if c.authKey == "" {
-		c.authKey = os.Getenv("TS_AUTHKEY")
-	}
-	if c.authKey == "" {
-		return nil, fmt.Errorf("an authkey must be provided")
+	authKey, err := c.resolveAuthKey()
+	if err != nil {
+		return nil, err
 	}
 
 	srv := &tsnet.Server{
 		Hostname:   c.hostname,
-		AuthKey:    c.authKey,
+		AuthKey:    authKey,
 		Dir:        c.storageDir,
 		ControlURL: c.controlURL,
 		Ephemeral:  c.ephemeral(),
@@ -123,6 +122,34 @@ func (c *serveConfig) createServer(log *slog.Logger) (*tsnet.Server, error) {
 	}
 
 	return srv, nil
+}
+
+// resolveAuthKey returns the authkey from -authkey, -authkey-file or the
+// TS_AUTHKEY environment variable, in that order. The environment variable is
+// read here rather than used as the flag default so the key is never printed
+// by the usage output.
+func (c *serveConfig) resolveAuthKey() (string, error) {
+	if c.authKey != "" && c.authKeyFile != "" {
+		return "", errors.New("only one of -authkey and -authkey-file can be set")
+	}
+	key := c.authKey
+	if c.authKeyFile != "" {
+		b, err := os.ReadFile(c.authKeyFile)
+		if err != nil {
+			return "", fmt.Errorf("reading authkey file: %w", err)
+		}
+		key = strings.TrimSpace(string(b))
+		if key == "" {
+			return "", fmt.Errorf("authkey file %s is empty", c.authKeyFile)
+		}
+	}
+	if key == "" {
+		key = os.Getenv("TS_AUTHKEY")
+	}
+	if key == "" {
+		return "", errors.New("an authkey must be provided with -authkey, -authkey-file or TS_AUTHKEY")
+	}
+	return key, nil
 }
 
 // ephemeral reports whether the proxy runs as an ephemeral node. That is the

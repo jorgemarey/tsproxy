@@ -1,14 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -81,14 +83,30 @@ func main() {
 	logger := cfg.logger()
 	port := cfg.servePort(logger, destination)
 
+	// Stop on Ctrl+C and on SIGTERM (what Docker and Kubernetes send).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	ln, err := srv.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("Can't listen on the tailnet", "error", err)
+		srv.Close()
+		os.Exit(1)
 	}
-	defer ln.Close()
+
+	go func() {
+		<-ctx.Done()
+		logger.Info("Shutting down")
+		ln.Close()
+	}()
 
 	logger.Info(fmt.Sprintf("Proxy server is running on address %s", ln.Addr().String()))
 	serve(logger, ln, destination)
+
+	// Disconnect from the tailnet cleanly and flush tailscale logs.
+	if err := srv.Close(); err != nil {
+		logger.Warn("Error shutting down tailscale", "error", err)
+	}
 }
 
 const maxAcceptDelay = time.Second

@@ -68,8 +68,9 @@ func main() {
 		os.Exit(0)
 	}
 
-	if fs.NArg() > 1 {
-		fmt.Println("Only one positional argument can be provided")
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "Exactly one destination (host:port) must be provided")
+		fs.Usage()
 		os.Exit(1)
 	}
 	destination := fs.Arg(0)

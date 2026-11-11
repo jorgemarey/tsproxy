@@ -110,17 +110,17 @@ func parseInbound(s string) (mapping, error) {
 	}
 	var err error
 	if m.dest, err = parseEndpoint(dest); err != nil {
-		return mapping{}, fmt.Errorf("mapping %q: %w", s, err)
+		return mapping{}, fmt.Errorf("tailnet mapping %q: %w", s, err)
 	}
 
 	var port int
 	switch {
 	case hasPort:
 		if port, err = parsePort(listenPort); err != nil {
-			return mapping{}, fmt.Errorf("mapping %q: invalid tailnet port: %w", s, err)
+			return mapping{}, fmt.Errorf("tailnet mapping %q: invalid tailnet port: %w", s, err)
 		}
 	case m.dest.network == "unix":
-		return mapping{}, fmt.Errorf("mapping %q: a tailnet port is required for unix sockets, e.g. 80=%s", s, dest)
+		return mapping{}, fmt.Errorf("tailnet mapping %q: a tailnet port is required for unix sockets, e.g. 80=%s", s, dest)
 	default:
 		port = endpointPort(m.dest)
 	}

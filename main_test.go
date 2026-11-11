@@ -103,12 +103,15 @@ func TestParseArgs(t *testing.T) {
 		args      []string
 		wantPos   []string
 		wantLocal []string
+		// wantTailnet is the -tailnet options; tailnetSpecs adds wantPos.
+		wantTailnet []string
 	}{
 		{args: []string{"a:1"}, wantPos: []string{"a:1"}},
 		{args: []string{"-local", "db:5432", "a:1"}, wantPos: []string{"a:1"}, wantLocal: []string{"db:5432"}},
 		{args: []string{"a:1", "-local", "db:5432", "b:2", "-local=c:3"}, wantPos: []string{"a:1", "b:2"}, wantLocal: []string{"db:5432", "c:3"}},
 		{args: []string{"a:1", "--", "-local", "b:2"}, wantPos: []string{"a:1", "-local", "b:2"}},
 		{args: []string{}, wantPos: nil},
+		{args: []string{"-tailnet", "80=a:8080", "b:2", "-local", "db:5432", "-tailnet=c:3"}, wantPos: []string{"b:2"}, wantTailnet: []string{"80=a:8080", "c:3"}, wantLocal: []string{"db:5432"}},
 	}
 	for _, tt := range tests {
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
@@ -121,6 +124,9 @@ func TestParseArgs(t *testing.T) {
 		}
 		if !slices.Equal(got, tt.wantPos) || !slices.Equal([]string(cfg.local), tt.wantLocal) {
 			t.Errorf("parseArgs(%q) = %q, local %q; want %q, local %q", tt.args, got, cfg.local, tt.wantPos, tt.wantLocal)
+		}
+		if want := slices.Concat(tt.wantTailnet, tt.wantPos); !slices.Equal(cfg.tailnetSpecs(got), want) {
+			t.Errorf("parseArgs(%q): tailnetSpecs = %q, want %q", tt.args, cfg.tailnetSpecs(got), want)
 		}
 	}
 }

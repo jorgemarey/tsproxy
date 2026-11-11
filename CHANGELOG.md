@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`-tailnet [PORT=]DEST[,tls]`** (repeatable), the counterpart of `-local`: it listens on the tailnet and exposes a local service there. Mapping arguments still work and mean the same as `-tailnet`.
+
+### Changed
+
+- **Error messages** for mappings listening on the tailnet start with `tailnet mapping` instead of `mapping`, like `local mapping` for `-local`.
+
 ## [0.2.0] - 2026-11-11
 
 ### Breaking changes

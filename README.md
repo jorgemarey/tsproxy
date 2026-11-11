@@ -123,4 +123,4 @@ On `SIGINT` or `SIGTERM` it stops accepting connections and shuts down within `-
 
 Set `-shutdown-timeout` below the time your supervisor waits before killing the process (`docker stop`: 10s, Kubernetes `terminationGracePeriodSeconds`: 30s, Nomad `kill_timeout`: 5s, systemd `TimeoutStopSec`). Otherwise the process can be killed before it leaves the tailnet, and an ephemeral device stays in the tailnet until the control server removes it. With Nomad's default, use `-shutdown-timeout 4s` or raise `kill_timeout`.
 
-A second signal exits immediately.
+If the shutdown hasn't finished by the timeout, for example because closing the Tailscale connection hangs, the process exits with status 1. A second signal exits immediately.

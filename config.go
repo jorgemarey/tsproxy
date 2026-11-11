@@ -98,7 +98,7 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.storageDir, "dir", "", "State storage directory. If set, the device is persistent and keeps its identity across restarts. If not, it is ephemeral and removed from the tailnet on shutdown")
 	fs.StringVar(&c.controlURL, "control-url", "", "Set if the coordination server is not the default")
 	fs.DurationVar(&c.upTimeout, "up-timeout", time.Minute, "How long to wait for the device to connect to the tailnet before exiting. 0 waits forever")
-	fs.DurationVar(&c.shutdownTimeout, "shutdown-timeout", 5*time.Second, "Total time to shut down: open connections get until 1s before it to finish (half of it if shorter), then they are closed and the device leaves the tailnet. Set it below your supervisor's kill timeout. A second signal exits immediately")
+	fs.DurationVar(&c.shutdownTimeout, "shutdown-timeout", 5*time.Second, "Total time to shut down: open connections get until 1s before it to finish (half of it if shorter), then they are closed and the device leaves the tailnet. Set it below your supervisor's kill timeout. Exits with status 1 if it's exceeded, and a second signal exits immediately")
 	fs.StringVar(&c.healthAddr, "health-addr", "", "Address to serve HTTP health checks on, e.g. 127.0.0.1:9002: /healthz (process is up) and /readyz (proxy is listening and connected to the tailnet). Disabled if empty")
 	fs.BoolVar(&c.webUI, "webui", false, fmt.Sprintf("Run the Tailscale web interface for this device on tailnet port %d", webUIPort))
 	fs.BoolVar(&c.noLogUpload, "no-log-upload", false, "Don't upload tailscale logs to Tailscale. Tailscale can't provide support for devices that opt out")

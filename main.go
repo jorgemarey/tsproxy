@@ -92,6 +92,13 @@ func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []ma
 	// The -shutdown-timeout budget starts with the shutdown: on the first
 	// signal, or when run returns early because of an error.
 	beginShutdown := sync.OnceValue(func() shutdownBudget {
+		// Exit if the shutdown overruns the timeout, e.g. if closing the
+		// tailscale server hangs, rather than waiting to be killed.
+		time.AfterFunc(cfg.shutdownTimeout, func() {
+			logger.Error("Shutdown didn't finish within -shutdown-timeout, exiting", "timeout", cfg.shutdownTimeout)
+			cfg.cleanup()
+			os.Exit(1)
+		})
 		return newShutdownBudget(time.Now(), cfg.shutdownTimeout)
 	})
 	defer func() { shutdown(logger, cfg, srv, beginShutdown().logoutDeadline()) }()

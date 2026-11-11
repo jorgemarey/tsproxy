@@ -35,7 +35,7 @@ func TestServeStopsOnClose(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		serve(slog.New(slog.DiscardHandler), ln, tcpDialer("127.0.0.1:1"), &connTracker{})
+		serve(t.Context(), slog.New(slog.DiscardHandler), ln, tcpDialer("127.0.0.1:1"), &connTracker{})
 	}()
 
 	select {
@@ -45,6 +45,49 @@ func TestServeStopsOnClose(t *testing.T) {
 	}
 	if ln.calls != ln.failures+1 {
 		t.Fatalf("Accept called %d times, want %d", ln.calls, ln.failures+1)
+	}
+}
+
+// failingListener always fails Accept with a non-close error, and closes
+// waiting once it has been called n times.
+type failingListener struct {
+	net.Listener
+	n       int
+	calls   int
+	waiting chan struct{}
+}
+
+func (l *failingListener) Accept() (net.Conn, error) {
+	l.calls++
+	if l.calls == l.n {
+		close(l.waiting)
+	}
+	return nil, errors.New("temporary failure")
+}
+
+// TestServeStopsOnCancelDuringRetry checks that cancelling the context
+// interrupts the wait before retrying a failed accept.
+func TestServeStopsOnCancelDuringRetry(t *testing.T) {
+	// After 8 failures serve has waited 5+10+...+320ms and starts a 640ms wait.
+	ln := &failingListener{n: 8, waiting: make(chan struct{})}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serve(ctx, slog.New(slog.DiscardHandler), ln, tcpDialer("127.0.0.1:1"), &connTracker{})
+	}()
+
+	select {
+	case <-ln.waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not retry the failed accepts")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("serve did not return after the context was cancelled")
 	}
 }
 

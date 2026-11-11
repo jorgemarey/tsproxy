@@ -167,7 +167,7 @@ func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []ma
 	for i, m := range mappings {
 		mLogger := logger.With("mapping", m.String())
 		mLogger.Info("Proxy is listening")
-		wg.Go(func() { serve(mLogger, listeners[i], dialer(srv, m), &conns) })
+		wg.Go(func() { serve(ctx, mLogger, listeners[i], dialer(srv, m), &conns) })
 	}
 	wg.Wait()
 
@@ -240,9 +240,9 @@ func shutdown(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server) {
 const maxAcceptDelay = time.Second
 
 // serve accepts connections on ln and proxies them using dial. It returns
-// once ln is closed. Other accept errors are retried with exponential backoff
-// so a persistent failure doesn't turn into a busy loop.
-func serve(logger *slog.Logger, ln net.Listener, dial dialFunc, conns *connTracker) {
+// once ln is closed or ctx is done. Other accept errors are retried with
+// exponential backoff so a persistent failure doesn't turn into a busy loop.
+func serve(ctx context.Context, logger *slog.Logger, ln net.Listener, dial dialFunc, conns *connTracker) {
 	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
@@ -256,7 +256,11 @@ func serve(logger *slog.Logger, ln net.Listener, dial dialFunc, conns *connTrack
 				delay = min(2*delay, maxAcceptDelay)
 			}
 			logger.Warn("Can't accept connection", "error", err, "retry_in", delay)
-			time.Sleep(delay)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
 			continue
 		}
 		delay = 0

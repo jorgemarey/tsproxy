@@ -85,8 +85,11 @@ func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []ma
 	// Stop on Ctrl+C and on SIGTERM (what service managers and container
 	// runtimes send).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	defer shutdown(logger, cfg, srv)
+	// Deferred after shutdown so it runs first: once shutting down, a second
+	// signal exits immediately, also during an early shutdown (a signal while
+	// connecting or a startup error).
+	defer stop()
 
 	var health *healthServer
 	if cfg.healthAddr != "" {

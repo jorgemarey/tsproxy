@@ -4,7 +4,9 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] - Unreleased
+## [Unreleased]
+
+## [0.2.0] - 2026-11-11
 
 ### Breaking changes
 
@@ -33,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **`-webui`** runs the Tailscale web interface for the device on tailnet port 5252.
 - **`-no-log-upload`** opts out of uploading Tailscale logs to Tailscale.
 - **Release binaries for arm64** (linux, windows and darwin).
+- **Container image** `ghcr.io/jorgemarey/tsproxy` for `linux/amd64` and `linux/arm64`. It's distroless and runs as a non-root user.
 
 ### Changed
 
@@ -69,5 +72,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Structured logging** with `log/slog`.
 - **Release binaries** for linux, windows and darwin on amd64.
 
-[0.2.0]: https://github.com/jorgemarey/tsproxy/compare/v0.1.0...main
+[Unreleased]: https://github.com/jorgemarey/tsproxy/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jorgemarey/tsproxy/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jorgemarey/tsproxy/releases/tag/v0.1.0

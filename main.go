@@ -113,7 +113,7 @@ func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []ma
 	case ctx.Err() != nil:
 		logger.Info("Shutting down")
 		return 0
-	case errors.Is(upCtx.Err(), context.DeadlineExceeded):
+	case err != nil && errors.Is(upCtx.Err(), context.DeadlineExceeded):
 		logger.Error(fmt.Sprintf("Timed out after %s connecting to the tailnet", cfg.upTimeout))
 		return 1
 	case err != nil:

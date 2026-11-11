@@ -5,78 +5,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"slices"
 	"testing"
 	"time"
 )
-
-// TestHandleConnHalfClose checks that a client can close its write side and
-// still receive the full response from the destination.
-func TestHandleConnHalfClose(t *testing.T) {
-	const request, response = "request", "response that is sent after the request is fully read"
-
-	// Destination: reads until EOF, then replies.
-	dst, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer dst.Close()
-	go func() {
-		c, err := dst.Accept()
-		if err != nil {
-			return
-		}
-		defer c.Close()
-		got, _ := io.ReadAll(c)
-		if string(got) != request {
-			t.Errorf("destination got %q, want %q", got, request)
-		}
-		time.Sleep(50 * time.Millisecond)
-		io.WriteString(c, response)
-	}()
-
-	// Proxy front end.
-	front, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer front.Close()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		c, err := front.Accept()
-		if err != nil {
-			return
-		}
-		handleConn(slog.New(slog.DiscardHandler), c, tcpDialer(dst.Addr().String()))
-	}()
-
-	client, err := net.Dial("tcp", front.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	client.SetDeadline(time.Now().Add(5 * time.Second))
-	io.WriteString(client, request)
-	client.(*net.TCPConn).CloseWrite()
-
-	got, err := io.ReadAll(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != response {
-		t.Fatalf("client got %q, want %q", got, response)
-	}
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleConn did not return")
-	}
-}
 
 // flakyListener fails Accept a few times with a non-close error, then reports
 // itself closed.
@@ -101,7 +35,7 @@ func TestServeStopsOnClose(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		serve(slog.New(slog.DiscardHandler), ln, tcpDialer("127.0.0.1:1"), &connTracker{})
+		serve(t.Context(), slog.New(slog.DiscardHandler), ln, tcpDialer("127.0.0.1:1"), &connTracker{})
 	}()
 
 	select {
@@ -111,6 +45,49 @@ func TestServeStopsOnClose(t *testing.T) {
 	}
 	if ln.calls != ln.failures+1 {
 		t.Fatalf("Accept called %d times, want %d", ln.calls, ln.failures+1)
+	}
+}
+
+// failingListener always fails Accept with a non-close error, and closes
+// waiting once it has been called n times.
+type failingListener struct {
+	net.Listener
+	n       int
+	calls   int
+	waiting chan struct{}
+}
+
+func (l *failingListener) Accept() (net.Conn, error) {
+	l.calls++
+	if l.calls == l.n {
+		close(l.waiting)
+	}
+	return nil, errors.New("temporary failure")
+}
+
+// TestServeStopsOnCancelDuringRetry checks that cancelling the context
+// interrupts the wait before retrying a failed accept.
+func TestServeStopsOnCancelDuringRetry(t *testing.T) {
+	// After 8 failures serve has waited 5+10+...+320ms and starts a 640ms wait.
+	ln := &failingListener{n: 8, waiting: make(chan struct{})}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serve(ctx, slog.New(slog.DiscardHandler), ln, tcpDialer("127.0.0.1:1"), &connTracker{})
+	}()
+
+	select {
+	case <-ln.waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not retry the failed accepts")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("serve did not return after the context was cancelled")
 	}
 }
 

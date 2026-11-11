@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -38,51 +37,6 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 		positional = append(positional, rest[0])
 		args = rest[1:]
 	}
-}
-
-// dialTimeout bounds how long connecting to a destination can take.
-const dialTimeout = 10 * time.Second
-
-func handleConn(logger *slog.Logger, in net.Conn, dial dialFunc) {
-	logger.Debug("Accepted and handling incoming connection")
-	defer logger.Debug("Closed incoming connection")
-	defer in.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
-	out, err := dial(ctx)
-	cancel()
-	if err != nil {
-		logger.Error("Dial destination failed", "error", err)
-		return
-	}
-	defer out.Close()
-
-	errCh := make(chan error, 2)
-	go proxy(out, in, errCh)
-	go proxy(in, out, errCh)
-	// Wait for both directions: one side finishing its writes (half-close)
-	// must not cut off data still flowing the other way.
-	for range 2 {
-		if err := <-errCh; err != nil && !errors.Is(err, net.ErrClosed) {
-			logger.Warn("Unexpected error when forwarding data", "error", err)
-		}
-	}
-}
-
-// proxy copies src into dst. When src reaches EOF the write side of dst is
-// closed so the peer sees the EOF too, while dst can keep sending data back.
-func proxy(dst, src net.Conn, errCh chan<- error) {
-	_, err := io.Copy(dst, src)
-	if err != nil {
-		// Abort the whole connection so the other direction doesn't hang.
-		dst.Close()
-		src.Close()
-	} else if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-		cw.CloseWrite()
-	} else {
-		dst.Close()
-	}
-	errCh <- err
 }
 
 func main() {
@@ -121,33 +75,30 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error creating proxy server: %s\n", err)
 		os.Exit(1)
 	}
+	os.Exit(run(logger, cfg, srv, mappings))
+}
 
+// run connects srv to the tailnet and proxies mappings until a signal
+// arrives, then waits for open connections and shuts down. It returns the
+// process exit code.
+func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []mapping) int {
 	// Stop on Ctrl+C and on SIGTERM (what service managers and container
 	// runtimes send).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer shutdown(logger, cfg, srv)
+	// Deferred after shutdown so it runs first: once shutting down, a second
+	// signal exits immediately, also during an early shutdown (a signal while
+	// connecting or a startup error).
 	defer stop()
 
 	var health *healthServer
 	if cfg.healthAddr != "" {
 		health = newHealthServer(srv)
-	}
-	closeHealth := func() {
-		if health != nil {
-			health.close()
-		}
-	}
-
-	fail := func(msg string, args ...any) {
-		logger.Error(msg, args...)
-		closeHealth()
-		shutdown(logger, cfg, srv)
-		os.Exit(1)
-	}
-
-	// Serve health checks while connecting, so /healthz answers right away.
-	if health != nil {
+		defer health.close()
+		// Serve health checks while connecting, so /healthz answers right away.
 		if err := health.start(logger, cfg.healthAddr); err != nil {
-			fail("Can't serve health checks", "error", err)
+			logger.Error("Can't serve health checks", "error", err)
+			return 1
 		}
 	}
 
@@ -164,13 +115,13 @@ func main() {
 	switch {
 	case ctx.Err() != nil:
 		logger.Info("Shutting down")
-		closeHealth()
-		shutdown(logger, cfg, srv)
-		return
-	case errors.Is(upCtx.Err(), context.DeadlineExceeded):
-		fail(fmt.Sprintf("Timed out after %s connecting to the tailnet", cfg.upTimeout))
+		return 0
+	case err != nil && errors.Is(upCtx.Err(), context.DeadlineExceeded):
+		logger.Error(fmt.Sprintf("Timed out after %s connecting to the tailnet", cfg.upTimeout))
+		return 1
 	case err != nil:
-		fail("Can't connect to the tailnet", "error", err)
+		logger.Error("Can't connect to the tailnet", "error", err)
+		return 1
 	}
 	var name string
 	if status.Self != nil {
@@ -188,11 +139,17 @@ func main() {
 		ln, err := listen(srv, m)
 		if err != nil {
 			closeListeners()
-			fail("Can't listen", "mapping", m.String(), "error", err)
+			logger.Error("Can't listen", "mapping", m.String(), "error", err)
+			return 1
 		}
 		listeners = append(listeners, ln)
 	}
 
+	// Mark the proxy ready before watching for shutdown, so the shutdown
+	// below always clears it afterwards.
+	if health != nil {
+		health.listening.Store(true)
+	}
 	go func() {
 		<-ctx.Done()
 		// Restore the default signal handling so a second signal exits
@@ -210,10 +167,7 @@ func main() {
 	for i, m := range mappings {
 		mLogger := logger.With("mapping", m.String())
 		mLogger.Info("Proxy is listening")
-		wg.Go(func() { serve(mLogger, listeners[i], dialer(srv, m), &conns) })
-	}
-	if health != nil && ctx.Err() == nil {
-		health.listening.Store(true)
+		wg.Go(func() { serve(ctx, mLogger, listeners[i], dialer(srv, m), &conns) })
 	}
 	wg.Wait()
 
@@ -223,8 +177,7 @@ func main() {
 			logger.Warn("Closing connections still open after the shutdown timeout", "connections", conns.active())
 		}
 	}
-	closeHealth()
-	shutdown(logger, cfg, srv)
+	return 0
 }
 
 // connTracker tracks the connections being proxied so shutdown can wait for
@@ -287,9 +240,9 @@ func shutdown(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server) {
 const maxAcceptDelay = time.Second
 
 // serve accepts connections on ln and proxies them using dial. It returns
-// once ln is closed. Other accept errors are retried with exponential backoff
-// so a persistent failure doesn't turn into a busy loop.
-func serve(logger *slog.Logger, ln net.Listener, dial dialFunc, conns *connTracker) {
+// once ln is closed or ctx is done. Other accept errors are retried with
+// exponential backoff so a persistent failure doesn't turn into a busy loop.
+func serve(ctx context.Context, logger *slog.Logger, ln net.Listener, dial dialFunc, conns *connTracker) {
 	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
@@ -303,7 +256,11 @@ func serve(logger *slog.Logger, ln net.Listener, dial dialFunc, conns *connTrack
 				delay = min(2*delay, maxAcceptDelay)
 			}
 			logger.Warn("Can't accept connection", "error", err, "retry_in", delay)
-			time.Sleep(delay)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
 			continue
 		}
 		delay = 0

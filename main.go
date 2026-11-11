@@ -142,6 +142,11 @@ func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []ma
 		listeners = append(listeners, ln)
 	}
 
+	// Mark the proxy ready before watching for shutdown, so the shutdown
+	// below always clears it afterwards.
+	if health != nil {
+		health.listening.Store(true)
+	}
 	go func() {
 		<-ctx.Done()
 		// Restore the default signal handling so a second signal exits
@@ -160,9 +165,6 @@ func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []ma
 		mLogger := logger.With("mapping", m.String())
 		mLogger.Info("Proxy is listening")
 		wg.Go(func() { serve(mLogger, listeners[i], dialer(srv, m), &conns) })
-	}
-	if health != nil && ctx.Err() == nil {
-		health.listening.Store(true)
 	}
 	wg.Wait()
 

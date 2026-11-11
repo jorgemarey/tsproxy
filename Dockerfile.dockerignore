@@ -1,0 +1,6 @@
+# Only the Go sources, go.mod/go.sum and VERSION are needed to build.
+*
+!*.go
+!go.mod
+!go.sum
+!VERSION

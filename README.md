@@ -73,6 +73,25 @@ $ tsproxy --hostname plex --dir /var/lib/tsproxy/plex 80=127.0.0.1:32400
 
 Each proxy instance needs its own state directory.
 
+## Container image
+
+Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/jorgemarey/tsproxy`, tagged with the release version (`0.2.0`), the minor version (`0.2`) and `latest`. The image runs as a non-root user (uid 65532), and its entrypoint is `tsproxy`, so the arguments are the usual options and mappings.
+
+Destinations like `127.0.0.1:8080` are resolved inside the proxy's container, so run it as a sidecar sharing the application's network (`--network container:<app>`, or the same pod in Kubernetes), or point the mappings at the application's address:
+
+```
+$ docker run -d --name plex-proxy --network container:plex -e TS_AUTHKEY \
+    ghcr.io/jorgemarey/tsproxy:0.2 --hostname plex 80=127.0.0.1:32400
+```
+
+For a persistent device, mount a volume on `/var/lib/tsproxy`, which the non-root user can write to, and pass `-dir /var/lib/tsproxy`:
+
+```
+$ docker run -d --name plex-proxy --network container:plex -e TS_AUTHKEY \
+    -v plex-proxy:/var/lib/tsproxy \
+    ghcr.io/jorgemarey/tsproxy:0.2 --hostname plex --dir /var/lib/tsproxy 80=127.0.0.1:32400
+```
+
 ## Web interface
 
 `-webui` runs the Tailscale web interface for the device on tailnet port 5252 (`http://<hostname>:5252`), where tailnet users can see its status and manage it. Access follows your tailnet's access rules, and changes require re-authenticating. Mappings can't use port 5252 while it's enabled.

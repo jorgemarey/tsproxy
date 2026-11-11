@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -192,20 +191,29 @@ const closeTimeout = time.Second
 // connTracker tracks the connections being proxied so shutdown can wait for
 // them to finish, and close them if they don't.
 type connTracker struct {
-	wg      sync.WaitGroup
-	mu      sync.Mutex
-	conns   map[net.Conn]struct{}
-	closing atomic.Bool
+	wg    sync.WaitGroup
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
+	// ctx is passed to the handlers and cancelled by closeAll.
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// init sets up t on first use. t.mu must be held.
+func (t *connTracker) init() {
+	if t.conns == nil {
+		t.conns = make(map[net.Conn]struct{})
+		t.ctx, t.cancel = context.WithCancel(context.Background())
+	}
 }
 
 // goHandle runs f in a new goroutine, tracking c as an open connection until
-// f returns.
-func (t *connTracker) goHandle(c net.Conn, f func()) {
+// f returns. f's context is cancelled by closeAll.
+func (t *connTracker) goHandle(c net.Conn, f func(ctx context.Context)) {
 	t.mu.Lock()
-	if t.conns == nil {
-		t.conns = make(map[net.Conn]struct{})
-	}
+	t.init()
 	t.conns[c] = struct{}{}
+	ctx := t.ctx
 	t.mu.Unlock()
 	t.wg.Go(func() {
 		defer func() {
@@ -213,7 +221,7 @@ func (t *connTracker) goHandle(c net.Conn, f func()) {
 			delete(t.conns, c)
 			t.mu.Unlock()
 		}()
-		f()
+		f(ctx)
 	})
 }
 
@@ -224,19 +232,17 @@ func (t *connTracker) active() int {
 	return len(t.conns)
 }
 
-// closeAll closes all open connections. Errors they cause from then on are
-// expected, see shuttingDown.
+// closeAll closes all open connections and cancels the handlers' context,
+// which also aborts the ones still connecting to their destination.
 func (t *connTracker) closeAll() {
-	t.closing.Store(true)
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.init()
+	t.cancel()
 	for c := range t.conns {
 		c.Close()
 	}
 }
-
-// shuttingDown reports whether closeAll was called.
-func (t *connTracker) shuttingDown() bool { return t.closing.Load() }
 
 // wait waits up to timeout for all connections to finish and reports
 // whether they did.
@@ -304,6 +310,6 @@ func serve(ctx context.Context, logger *slog.Logger, ln net.Listener, dial dialF
 		}
 		delay = 0
 		thisLogger := logger.With("source", conn.RemoteAddr().String())
-		conns.goHandle(conn, func() { handleConn(thisLogger, conn, dial, conns.shuttingDown) })
+		conns.goHandle(conn, func(ctx context.Context) { handleConn(ctx, thisLogger, conn, dial) })
 	}
 }

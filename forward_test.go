@@ -49,7 +49,7 @@ func TestHandleConnHalfClose(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleConn(slog.New(slog.DiscardHandler), c, tcpDialer(dst.Addr().String()), func() bool { return false })
+		handleConn(t.Context(), slog.New(slog.DiscardHandler), c, tcpDialer(dst.Addr().String()))
 	}()
 
 	client, err := net.Dial("tcp", front.Addr().String())
@@ -186,7 +186,12 @@ func TestPipeErrorLevel(t *testing.T) {
 	for _, shuttingDown := range []bool{false, true} {
 		a, b := net.Pipe()
 		logs := &recordHandler{}
-		pipe(slog.New(logs), a, failingConn{b}, func() bool { return shuttingDown })
+		ctx, cancel := context.WithCancel(t.Context())
+		if shuttingDown {
+			cancel()
+		}
+		pipe(ctx, slog.New(logs), a, failingConn{b})
+		cancel()
 		want := 1
 		if shuttingDown {
 			want = 0
@@ -197,5 +202,31 @@ func TestPipeErrorLevel(t *testing.T) {
 		if len(logs.levels) != 1 {
 			t.Errorf("shuttingDown=%v: logged %d records, want 1", shuttingDown, len(logs.levels))
 		}
+	}
+}
+
+// TestConnTrackerCloseAllCancelsDial checks that closeAll aborts a handler
+// still connecting to its destination, without logging warnings.
+func TestConnTrackerCloseAllCancelsDial(t *testing.T) {
+	dialing := make(chan struct{})
+	dial := func(ctx context.Context) (net.Conn, error) {
+		close(dialing)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	in, peer := net.Pipe()
+	defer peer.Close()
+	logs := &recordHandler{}
+	var conns connTracker
+	conns.goHandle(in, func(ctx context.Context) { handleConn(ctx, slog.New(logs), in, dial) })
+	<-dialing
+
+	conns.closeAll()
+	if !conns.wait(time.Second) {
+		t.Fatal("the handler did not return after closeAll cancelled its dial")
+	}
+	if n := logs.warnings(); n != 0 {
+		t.Fatalf("logged %d warnings or errors, want 0", n)
 	}
 }

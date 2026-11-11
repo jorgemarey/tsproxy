@@ -139,7 +139,7 @@ func TestConnTrackerWait(t *testing.T) {
 	c, peer := net.Pipe()
 	defer c.Close()
 	defer peer.Close()
-	conns.goHandle(c, func() { <-release })
+	conns.goHandle(c, func(context.Context) { <-release })
 
 	if n := conns.active(); n != 1 {
 		t.Fatalf("active() = %d, want 1", n)

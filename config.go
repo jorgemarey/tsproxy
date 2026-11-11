@@ -19,27 +19,37 @@ import (
 
 const usage = `Usage: tsproxy [options] [MAPPING...]
 
-Exposes local services on the tailnet (MAPPING arguments) and tailnet
-services locally (-local options). At least one mapping is required.
+Exposes local services on the tailnet (-tailnet) and tailnet services
+locally (-local). Both options can be repeated, and are named after where
+the mapping listens. MAPPING arguments are the same as -tailnet. At least
+one mapping is required.
 
-MAPPING, from the tailnet to a local service: [PORT=]DEST[,tls]
+-tailnet, listen on the tailnet and connect to a local service:
+[PORT=]DEST[,tls]
   DEST is HOST:PORT or unix:/path/to.sock. PORT is the port on the tailnet;
   it defaults to DEST's port and is required for unix sockets. With ",tls"
   the port serves TLS using the device's Tailscale certificate (HTTPS and
   MagicDNS must be enabled in the tailnet).
 
--local, from a local listener to a tailnet service: [LISTEN=]HOST:PORT
+-local, listen locally and connect to a tailnet service:
+[LISTEN=]HOST:PORT
   HOST:PORT is an address on the tailnet. LISTEN is a PORT (bound to
   127.0.0.1), HOST:PORT or unix:/path/to.sock; it defaults to 127.0.0.1
   and the tailnet port.
 
 Examples:
   tsproxy -hostname plex 127.0.0.1:32400
-  tsproxy -hostname web 80=127.0.0.1:8080 443=127.0.0.1:8080,tls 9000=unix:/run/app.sock
-  tsproxy -hostname app -local 5432=db:5432 -local unix:/tmp/redis.sock=cache:6379
+  tsproxy -hostname web -tailnet 80=127.0.0.1:8080 -tailnet 443=127.0.0.1:8080,tls
+  tsproxy -hostname app -tailnet 9000=unix:/run/app.sock -local 5432=db:5432 -local unix:/tmp/redis.sock=cache:6379
 
 Options:
 `
+
+// tailnetSpecs returns the specs of the mappings listening on the tailnet:
+// the -tailnet options followed by the MAPPING arguments.
+func (c *serveConfig) tailnetSpecs(args []string) []string {
+	return slices.Concat([]string(c.tailnet), args)
+}
 
 // webUIPort is the tailnet port of the Tailscale web interface (-webui).
 const webUIPort = 5252
@@ -65,6 +75,7 @@ type serveConfig struct {
 	webUI           bool
 	tags            string
 	logLevel        slog.Level
+	tailnet         stringList
 	local           stringList
 
 	// tempDir is the temporary tsnet directory used by ephemeral nodes. It is
@@ -77,6 +88,7 @@ func (c *serveConfig) configureByFlags(fs *flag.FlagSet) {
 		fmt.Fprint(fs.Output(), usage)
 		fs.PrintDefaults()
 	}
+	fs.Var(&c.tailnet, "tailnet", "Expose a local service on the tailnet: [PORT=]DEST[,tls]. Can be repeated")
 	fs.Var(&c.local, "local", "Expose a tailnet service locally: [LISTEN=]HOST:PORT. Can be repeated")
 	fs.BoolVar(&c.version, "version", false, "Prints program version")
 	fs.StringVar(&c.hostname, "hostname", "", "Name for the device this proxy represents")

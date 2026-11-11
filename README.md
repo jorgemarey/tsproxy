@@ -27,33 +27,35 @@ $ tsproxy --hostname plex --tags tag:proxy --authkey-file /run/secrets/ts-oauth 
 
 ## Mappings
 
-Each argument exposes a local service on the tailnet:
+A mapping listens on one side and forwards connections to the other. There are two kinds, named after where they listen, and both options can be repeated:
 
-```
-[PORT=]DEST[,tls]
-```
+- `-tailnet` listens **on the tailnet** and exposes a local service there.
+- `-local` listens **locally** and exposes a tailnet service, so applications next to the proxy can reach it without running Tailscale.
+
+### `-tailnet [PORT=]DEST[,tls]`
 
 - `DEST` is `HOST:PORT` (IPv6 hosts in brackets, e.g. `[::1]:8080`) or a unix socket, `unix:/path/to.sock`.
 - `PORT` is the port on the tailnet. It defaults to the port of `DEST`, and is required for unix sockets.
 - `,tls` serves the port over TLS using the device's Tailscale certificate (`https://<hostname>.<tailnet>.ts.net`). HTTPS and MagicDNS must be enabled for the tailnet.
 
-The `-local` option (can be repeated) does the opposite: it exposes a tailnet service on a local listener, so applications next to the proxy can reach it without running Tailscale:
+Arguments are the same as `-tailnet`, so `tsproxy 80=127.0.0.1:8080` and `tsproxy -tailnet 80=127.0.0.1:8080` are equivalent.
 
-```
--local [LISTEN=]HOST:PORT
-```
+### `-local [LISTEN=]HOST:PORT`
 
 - `HOST:PORT` is an address on the tailnet (a MagicDNS name or a tailnet IP).
 - `LISTEN` is a `PORT` (bound to `127.0.0.1`), a `HOST:PORT` or `unix:/path/to.sock`. It defaults to `127.0.0.1` and the tailnet port.
 
-Examples:
+### Examples
 
 ```
 # HTTP on 80 and HTTPS on 443 for a local web app, plus a service on a unix socket
-$ tsproxy --hostname web 80=127.0.0.1:8080 443=127.0.0.1:8080,tls 9000=unix:/run/app.sock
+$ tsproxy --hostname web -tailnet 80=127.0.0.1:8080 -tailnet 443=127.0.0.1:8080,tls -tailnet 9000=unix:/run/app.sock
 
 # Reach a tailnet database on 127.0.0.1:5432 and a tailnet redis on a unix socket
 $ tsproxy --hostname app -local db:5432 -local unix:/tmp/redis.sock=cache:6379
+
+# Both: expose an app on the tailnet, and let it reach a tailnet database
+$ tsproxy --hostname app -tailnet 80=127.0.0.1:8080 -local 5432=db:5432
 ```
 
 Unix socket paths can't contain `=` or end in `,tls`.

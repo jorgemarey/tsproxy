@@ -19,7 +19,7 @@ import (
 )
 
 // parseArgs parses flags anywhere in args, unlike fs.Parse which stops at the
-// first positional argument, so "-local" can follow mappings. Arguments after
+// first positional argument, so "-tailnet" and "-local" can follow mappings. Arguments after
 // "--" are always positional.
 func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	var positional []string
@@ -58,12 +58,13 @@ func main() {
 		os.Exit(0)
 	}
 
-	if len(args) == 0 && len(cfg.local) == 0 {
+	tailnetSpecs := cfg.tailnetSpecs(args)
+	if len(tailnetSpecs) == 0 && len(cfg.local) == 0 {
 		fmt.Fprintln(os.Stderr, "At least one mapping must be provided")
 		fs.Usage()
 		os.Exit(1)
 	}
-	mappings, err := parseMappings(args, cfg.local, cfg.reservedPorts())
+	mappings, err := parseMappings(tailnetSpecs, cfg.local, cfg.reservedPorts())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

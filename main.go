@@ -75,33 +75,27 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error creating proxy server: %s\n", err)
 		os.Exit(1)
 	}
+	os.Exit(run(logger, cfg, srv, mappings))
+}
 
+// run connects srv to the tailnet and proxies mappings until a signal
+// arrives, then waits for open connections and shuts down. It returns the
+// process exit code.
+func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []mapping) int {
 	// Stop on Ctrl+C and on SIGTERM (what service managers and container
 	// runtimes send).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer shutdown(logger, cfg, srv)
 
 	var health *healthServer
 	if cfg.healthAddr != "" {
 		health = newHealthServer(srv)
-	}
-	closeHealth := func() {
-		if health != nil {
-			health.close()
-		}
-	}
-
-	fail := func(msg string, args ...any) {
-		logger.Error(msg, args...)
-		closeHealth()
-		shutdown(logger, cfg, srv)
-		os.Exit(1)
-	}
-
-	// Serve health checks while connecting, so /healthz answers right away.
-	if health != nil {
+		defer health.close()
+		// Serve health checks while connecting, so /healthz answers right away.
 		if err := health.start(logger, cfg.healthAddr); err != nil {
-			fail("Can't serve health checks", "error", err)
+			logger.Error("Can't serve health checks", "error", err)
+			return 1
 		}
 	}
 
@@ -118,13 +112,13 @@ func main() {
 	switch {
 	case ctx.Err() != nil:
 		logger.Info("Shutting down")
-		closeHealth()
-		shutdown(logger, cfg, srv)
-		return
+		return 0
 	case errors.Is(upCtx.Err(), context.DeadlineExceeded):
-		fail(fmt.Sprintf("Timed out after %s connecting to the tailnet", cfg.upTimeout))
+		logger.Error(fmt.Sprintf("Timed out after %s connecting to the tailnet", cfg.upTimeout))
+		return 1
 	case err != nil:
-		fail("Can't connect to the tailnet", "error", err)
+		logger.Error("Can't connect to the tailnet", "error", err)
+		return 1
 	}
 	var name string
 	if status.Self != nil {
@@ -142,7 +136,8 @@ func main() {
 		ln, err := listen(srv, m)
 		if err != nil {
 			closeListeners()
-			fail("Can't listen", "mapping", m.String(), "error", err)
+			logger.Error("Can't listen", "mapping", m.String(), "error", err)
+			return 1
 		}
 		listeners = append(listeners, ln)
 	}
@@ -177,8 +172,7 @@ func main() {
 			logger.Warn("Closing connections still open after the shutdown timeout", "connections", conns.active())
 		}
 	}
-	closeHealth()
-	shutdown(logger, cfg, srv)
+	return 0
 }
 
 // connTracker tracks the connections being proxied so shutdown can wait for

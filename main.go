@@ -1,38 +1,42 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"log"
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"tailscale.com/tsnet"
 )
 
-func handleConn(logger *slog.Logger, in net.Conn, destination string) {
-	logger.Debug("Accepted and handling incomming connection")
-	defer logger.Debug("Closed incomming connection")
-	defer in.Close()
-
-	out, err := net.Dial("tcp", destination)
-	if err != nil {
-		logger.Error("Dial remote failed", "remote", destination, "error", err)
-		return
+// parseArgs parses flags anywhere in args, unlike fs.Parse which stops at the
+// first positional argument, so "-local" can follow mappings. Arguments after
+// "--" are always positional.
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if consumed := len(args) - len(rest); consumed > 0 && args[consumed-1] == "--" {
+			return append(positional, rest...), nil
+		}
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
 	}
-	defer out.Close()
-
-	errCh := make(chan error, 2)
-	go copy(out, in, errCh)
-	go copy(in, out, errCh)
-	if err = <-errCh; err != nil && err != io.EOF {
-		logger.Warn("Unexpectected error when forwarding data", "error", err)
-	}
-}
-
-func copy(from, to net.Conn, errCh chan<- error) {
-	_, err := io.Copy(to, from)
-	errCh <- err
 }
 
 func main() {
@@ -40,8 +44,13 @@ func main() {
 	cfg := &serveConfig{}
 	cfg.configureByFlags(fs)
 
-	if err := fs.Parse(os.Args[1:]); err != nil {
-		os.Exit(1)
+	args, err := parseArgs(fs, os.Args[1:])
+	if err != nil {
+		// The flag package has already printed the error and usage.
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		os.Exit(2)
 	}
 
 	if cfg.version {
@@ -49,35 +58,213 @@ func main() {
 		os.Exit(0)
 	}
 
-	if fs.NArg() > 1 {
-		fmt.Println("Only one positional argument can be provided")
+	if len(args) == 0 && len(cfg.local) == 0 {
+		fmt.Fprintln(os.Stderr, "At least one mapping must be provided")
+		fs.Usage()
 		os.Exit(1)
 	}
-	destination := fs.Arg(0)
-
-	srv, err := cfg.createServer()
+	mappings, err := parseMappings(args, cfg.local, cfg.reservedPorts())
 	if err != nil {
-		fmt.Printf("Error creating proxy server: %s", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
 	logger := cfg.logger()
-	port := cfg.servePort(logger, destination)
-
-	ln, err := srv.Listen("tcp", fmt.Sprintf(":%d", port))
+	srv, err := cfg.createServer(logger)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "Error creating proxy server: %s\n", err)
+		os.Exit(1)
 	}
-	defer ln.Close()
+	os.Exit(run(logger, cfg, srv, mappings))
+}
 
-	logger.Info(fmt.Sprintf("Proxy server is running on address %s", ln.Addr().String()))
+// run connects srv to the tailnet and proxies mappings until a signal
+// arrives, then waits for open connections and shuts down. It returns the
+// process exit code.
+func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []mapping) int {
+	// Stop on Ctrl+C and on SIGTERM (what service managers and container
+	// runtimes send).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer shutdown(logger, cfg, srv)
+	// Deferred after shutdown so it runs first: once shutting down, a second
+	// signal exits immediately, also during an early shutdown (a signal while
+	// connecting or a startup error).
+	defer stop()
+
+	var health *healthServer
+	if cfg.healthAddr != "" {
+		health = newHealthServer(srv)
+		defer health.close()
+		// Serve health checks while connecting, so /healthz answers right away.
+		if err := health.start(logger, cfg.healthAddr); err != nil {
+			logger.Error("Can't serve health checks", "error", err)
+			return 1
+		}
+	}
+
+	// Wait for the node to connect before listening, so a bad authkey or an
+	// unreachable control server fails at startup instead of on the first
+	// connection. TLS listeners also need it to get their certificate.
+	logger.Info("Connecting to the tailnet")
+	upCtx, cancelUp := ctx, context.CancelFunc(func() {})
+	if cfg.upTimeout > 0 {
+		upCtx, cancelUp = context.WithTimeout(ctx, cfg.upTimeout)
+	}
+	status, err := srv.Up(upCtx)
+	cancelUp()
+	switch {
+	case ctx.Err() != nil:
+		logger.Info("Shutting down")
+		return 0
+	case err != nil && errors.Is(upCtx.Err(), context.DeadlineExceeded):
+		logger.Error(fmt.Sprintf("Timed out after %s connecting to the tailnet", cfg.upTimeout))
+		return 1
+	case err != nil:
+		logger.Error("Can't connect to the tailnet", "error", err)
+		return 1
+	}
+	var name string
+	if status.Self != nil {
+		name = strings.TrimSuffix(status.Self.DNSName, ".")
+	}
+	logger.Info("Connected to the tailnet", "name", name, "ips", status.TailscaleIPs)
+
+	listeners := make([]net.Listener, 0, len(mappings))
+	closeListeners := func() {
+		for _, ln := range listeners {
+			ln.Close()
+		}
+	}
+	for _, m := range mappings {
+		ln, err := listen(srv, m)
+		if err != nil {
+			closeListeners()
+			logger.Error("Can't listen", "mapping", m.String(), "error", err)
+			return 1
+		}
+		listeners = append(listeners, ln)
+	}
+
+	// Mark the proxy ready before watching for shutdown, so the shutdown
+	// below always clears it afterwards.
+	if health != nil {
+		health.listening.Store(true)
+	}
+	go func() {
+		<-ctx.Done()
+		// Restore the default signal handling so a second signal exits
+		// immediately instead of waiting for connections to finish.
+		stop()
+		logger.Info("Shutting down")
+		if health != nil {
+			health.listening.Store(false)
+		}
+		closeListeners()
+	}()
+
+	var conns connTracker
+	var wg sync.WaitGroup
+	for i, m := range mappings {
+		mLogger := logger.With("mapping", m.String())
+		mLogger.Info("Proxy is listening")
+		wg.Go(func() { serve(ctx, mLogger, listeners[i], dialer(srv, m), &conns) })
+	}
+	wg.Wait()
+
+	if n := conns.active(); n > 0 {
+		logger.Info("Waiting for open connections to finish", "connections", n, "timeout", cfg.shutdownTimeout)
+		if !conns.wait(cfg.shutdownTimeout) {
+			logger.Warn("Closing connections still open after the shutdown timeout", "connections", conns.active())
+		}
+	}
+	return 0
+}
+
+// connTracker tracks the connections being proxied so shutdown can wait for
+// them to finish.
+type connTracker struct {
+	wg sync.WaitGroup
+	n  atomic.Int64
+}
+
+// goHandle runs f in a new goroutine, tracking it as an open connection.
+func (t *connTracker) goHandle(f func()) {
+	t.n.Add(1)
+	t.wg.Go(func() {
+		defer t.n.Add(-1)
+		f()
+	})
+}
+
+// active returns the number of open connections.
+func (t *connTracker) active() int64 { return t.n.Load() }
+
+// wait waits up to timeout for all connections to finish and reports
+// whether they did.
+func (t *connTracker) wait(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		t.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// shutdown disconnects from the tailnet. Ephemeral nodes log out first so the
+// control server removes them right away; otherwise the device lingers until
+// it times out and a restarted proxy gets a suffixed name like "plex-1".
+func shutdown(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server) {
+	if cfg.ephemeral() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if lc, err := srv.LocalClient(); err != nil {
+			logger.Warn("Can't get tailscale local client to log out", "error", err)
+		} else if err := lc.Logout(ctx); err != nil {
+			logger.Warn("Error logging out ephemeral node", "error", err)
+		}
+	}
+	// Close also flushes tailscale logs.
+	if err := srv.Close(); err != nil {
+		logger.Warn("Error shutting down tailscale", "error", err)
+	}
+	if err := cfg.cleanup(); err != nil {
+		logger.Warn("Error removing temporary directory", "error", err)
+	}
+}
+
+const maxAcceptDelay = time.Second
+
+// serve accepts connections on ln and proxies them using dial. It returns
+// once ln is closed or ctx is done. Other accept errors are retried with
+// exponential backoff so a persistent failure doesn't turn into a busy loop.
+func serve(ctx context.Context, logger *slog.Logger, ln net.Listener, dial dialFunc, conns *connTracker) {
+	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			logger.Warn("Can't accept connection", "error", err)
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if delay == 0 {
+				delay = 5 * time.Millisecond
+			} else {
+				delay = min(2*delay, maxAcceptDelay)
+			}
+			logger.Warn("Can't accept connection", "error", err, "retry_in", delay)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
 			continue
 		}
+		delay = 0
 		thisLogger := logger.With("source", conn.RemoteAddr().String())
-		go handleConn(thisLogger, conn, destination)
+		conns.goHandle(func() { handleConn(thisLogger, conn, dial) })
 	}
 }

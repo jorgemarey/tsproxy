@@ -115,4 +115,4 @@ Like the regular Tailscale client, tsproxy uploads its Tailscale logs to Tailsca
 
 On startup the proxy waits for the device to connect to the tailnet before listening, and exits if that takes longer than `-up-timeout` (1 minute by default, `0` to wait forever), so a wrong authkey or an unreachable control server fails right away.
 
-On `SIGINT` or `SIGTERM` it stops accepting connections and waits up to `-shutdown-timeout` (5 seconds by default) for open connections to finish before leaving the tailnet. A second signal exits immediately.
+On `SIGINT` or `SIGTERM` it stops accepting connections and waits up to `-shutdown-timeout` (5 seconds by default) for open connections to finish, closes the ones still open, and leaves the tailnet. Long-lived connections, like HTTP keep-alive or streaming, usually don't finish on their own, so they are closed at the timeout. A second signal exits immediately.

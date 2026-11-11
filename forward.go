@@ -14,8 +14,9 @@ import (
 const dialTimeout = 10 * time.Second
 
 // handleConn connects to the destination with dial and forwards data between
-// it and in until both directions are done.
-func handleConn(logger *slog.Logger, in net.Conn, dial dialFunc) {
+// it and in until both directions are done. Once shuttingDown returns true,
+// forwarding errors are expected and only logged at debug level.
+func handleConn(logger *slog.Logger, in net.Conn, dial dialFunc, shuttingDown func() bool) {
 	logger.Debug("Accepted and handling incoming connection")
 	defer logger.Debug("Closed incoming connection")
 	defer in.Close()
@@ -32,8 +33,8 @@ func handleConn(logger *slog.Logger, in net.Conn, dial dialFunc) {
 	// Wait for both directions: one side finishing its writes (half-close)
 	// must not cut off data still flowing the other way.
 	var wg sync.WaitGroup
-	wg.Go(func() { pipe(logger, out, in) })
-	wg.Go(func() { pipe(logger, in, out) })
+	wg.Go(func() { pipe(logger, out, in, shuttingDown) })
+	wg.Go(func() { pipe(logger, in, out, shuttingDown) })
 	wg.Wait()
 }
 
@@ -41,12 +42,16 @@ func handleConn(logger *slog.Logger, in net.Conn, dial dialFunc) {
 // closed so the peer sees the EOF too, while dst can keep sending data back.
 // On any other error both conns are closed so the other direction doesn't
 // hang.
-func pipe(logger *slog.Logger, dst, src net.Conn) {
+func pipe(logger *slog.Logger, dst, src net.Conn, shuttingDown func() bool) {
 	if _, err := io.Copy(dst, src); err != nil {
 		dst.Close()
 		src.Close()
-		// net.ErrClosed means the other direction already aborted.
-		if !errors.Is(err, net.ErrClosed) {
+		switch {
+		case errors.Is(err, net.ErrClosed):
+			// The other direction already aborted.
+		case shuttingDown():
+			logger.Debug("Forwarding stopped by shutdown", "error", err)
+		default:
 			logger.Warn("Unexpected error when forwarding data", "error", err)
 		}
 		return

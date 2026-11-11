@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Error messages** for mappings listening on the tailnet start with `tailnet mapping` instead of `mapping`, like `local mapping` for `-local`.
 
+### Fixed
+
+- **Shutdown warnings.** Connections still open at the end of `-shutdown-timeout` weren't closed by the proxy, but cut when it left the tailnet. That logged an "Unexpected error when forwarding data" warning for each one. They are now closed before leaving the tailnet, and forwarding errors after that are only logged at `debug`.
+
 ## [0.2.0] - 2026-11-11
 
 ### Breaking changes

@@ -176,29 +176,67 @@ func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []ma
 		logger.Info("Waiting for open connections to finish", "connections", n, "timeout", cfg.shutdownTimeout)
 		if !conns.wait(cfg.shutdownTimeout) {
 			logger.Warn("Closing connections still open after the shutdown timeout", "connections", conns.active())
+			// Close them before leaving the tailnet, and let their handlers
+			// finish so they don't log errors about the tailnet going away.
+			conns.closeAll()
+			conns.wait(closeTimeout)
 		}
 	}
 	return 0
 }
 
+// closeTimeout bounds how long shutdown waits for handlers to return after
+// their connections are closed.
+const closeTimeout = time.Second
+
 // connTracker tracks the connections being proxied so shutdown can wait for
-// them to finish.
+// them to finish, and close them if they don't.
 type connTracker struct {
-	wg sync.WaitGroup
-	n  atomic.Int64
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	conns   map[net.Conn]struct{}
+	closing atomic.Bool
 }
 
-// goHandle runs f in a new goroutine, tracking it as an open connection.
-func (t *connTracker) goHandle(f func()) {
-	t.n.Add(1)
+// goHandle runs f in a new goroutine, tracking c as an open connection until
+// f returns.
+func (t *connTracker) goHandle(c net.Conn, f func()) {
+	t.mu.Lock()
+	if t.conns == nil {
+		t.conns = make(map[net.Conn]struct{})
+	}
+	t.conns[c] = struct{}{}
+	t.mu.Unlock()
 	t.wg.Go(func() {
-		defer t.n.Add(-1)
+		defer func() {
+			t.mu.Lock()
+			delete(t.conns, c)
+			t.mu.Unlock()
+		}()
 		f()
 	})
 }
 
 // active returns the number of open connections.
-func (t *connTracker) active() int64 { return t.n.Load() }
+func (t *connTracker) active() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.conns)
+}
+
+// closeAll closes all open connections. Errors they cause from then on are
+// expected, see shuttingDown.
+func (t *connTracker) closeAll() {
+	t.closing.Store(true)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for c := range t.conns {
+		c.Close()
+	}
+}
+
+// shuttingDown reports whether closeAll was called.
+func (t *connTracker) shuttingDown() bool { return t.closing.Load() }
 
 // wait waits up to timeout for all connections to finish and reports
 // whether they did.
@@ -266,6 +304,6 @@ func serve(ctx context.Context, logger *slog.Logger, ln net.Listener, dial dialF
 		}
 		delay = 0
 		thisLogger := logger.With("source", conn.RemoteAddr().String())
-		conns.goHandle(func() { handleConn(thisLogger, conn, dial) })
+		conns.goHandle(conn, func() { handleConn(thisLogger, conn, dial, conns.shuttingDown) })
 	}
 }

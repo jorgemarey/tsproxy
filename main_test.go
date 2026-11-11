@@ -136,7 +136,10 @@ func TestParseArgs(t *testing.T) {
 func TestConnTrackerWait(t *testing.T) {
 	var conns connTracker
 	release := make(chan struct{})
-	conns.goHandle(func() { <-release })
+	c, peer := net.Pipe()
+	defer c.Close()
+	defer peer.Close()
+	conns.goHandle(c, func() { <-release })
 
 	if n := conns.active(); n != 1 {
 		t.Fatalf("active() = %d, want 1", n)

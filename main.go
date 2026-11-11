@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -69,6 +68,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if cfg.shutdownTimeout <= 0 {
+		fmt.Fprintln(os.Stderr, "-shutdown-timeout must be greater than 0")
+		os.Exit(1)
+	}
 
 	logger := cfg.logger()
 	srv, err := cfg.createServer(logger)
@@ -86,7 +89,19 @@ func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []ma
 	// Stop on Ctrl+C and on SIGTERM (what service managers and container
 	// runtimes send).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer shutdown(logger, cfg, srv)
+	// The -shutdown-timeout budget starts with the shutdown: on the first
+	// signal, or when run returns early because of an error.
+	beginShutdown := sync.OnceValue(func() shutdownBudget {
+		// Exit if the shutdown overruns the timeout, e.g. if closing the
+		// tailscale server hangs, rather than waiting to be killed.
+		time.AfterFunc(cfg.shutdownTimeout, func() {
+			logger.Error("Shutdown didn't finish within -shutdown-timeout, exiting", "timeout", cfg.shutdownTimeout)
+			cfg.cleanup()
+			os.Exit(1)
+		})
+		return newShutdownBudget(time.Now(), cfg.shutdownTimeout)
+	})
+	defer func() { shutdown(logger, cfg, srv, beginShutdown().logoutDeadline()) }()
 	// Deferred after shutdown so it runs first: once shutting down, a second
 	// signal exits immediately, also during an early shutdown (a signal while
 	// connecting or a startup error).
@@ -153,6 +168,7 @@ func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []ma
 	}
 	go func() {
 		<-ctx.Done()
+		beginShutdown()
 		// Restore the default signal handling so a second signal exits
 		// immediately instead of waiting for connections to finish.
 		stop()
@@ -172,33 +188,106 @@ func run(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, mappings []ma
 	}
 	wg.Wait()
 
+	budget := beginShutdown()
 	if n := conns.active(); n > 0 {
-		logger.Info("Waiting for open connections to finish", "connections", n, "timeout", cfg.shutdownTimeout)
-		if !conns.wait(cfg.shutdownTimeout) {
-			logger.Warn("Closing connections still open after the shutdown timeout", "connections", conns.active())
+		wait := time.Until(budget.drainDeadline())
+		logger.Info("Waiting for open connections to finish", "connections", n, "timeout", wait.Round(time.Millisecond))
+		if !conns.wait(wait) {
+			logger.Warn("Closing connections still open at the shutdown timeout", "connections", conns.active())
+			// Close them before leaving the tailnet, and let their handlers
+			// finish so they don't log errors about the tailnet going away.
+			conns.closeAll()
+			conns.wait(closeTimeout)
 		}
 	}
 	return 0
 }
 
-// connTracker tracks the connections being proxied so shutdown can wait for
-// them to finish.
-type connTracker struct {
-	wg sync.WaitGroup
-	n  atomic.Int64
+// closeTimeout bounds how long shutdown waits for handlers to return after
+// their connections are closed. Closing a connection or cancelling its dial
+// makes the handler return right away, so this is only a backstop.
+const closeTimeout = 100 * time.Millisecond
+
+// leaveReserve is the part of -shutdown-timeout kept for closing the
+// connections still open and leaving the tailnet, at most half of it.
+const leaveReserve = time.Second
+
+// shutdownBudget splits -shutdown-timeout, counted from the start of the
+// shutdown, between waiting for open connections to finish and leaving the
+// tailnet, so the whole shutdown fits in it.
+type shutdownBudget struct {
+	// deadline is when the shutdown must be done.
+	deadline time.Time
+	// reserve is the time before deadline kept for leaving the tailnet.
+	reserve time.Duration
 }
 
-// goHandle runs f in a new goroutine, tracking it as an open connection.
-func (t *connTracker) goHandle(f func()) {
-	t.n.Add(1)
+func newShutdownBudget(start time.Time, timeout time.Duration) shutdownBudget {
+	return shutdownBudget{deadline: start.Add(timeout), reserve: min(leaveReserve, timeout/2)}
+}
+
+// drainDeadline is when connections still open are closed.
+func (b shutdownBudget) drainDeadline() time.Time { return b.deadline.Add(-b.reserve) }
+
+// logoutDeadline is when logging out gives up. The last quarter of the
+// reserve is left for closing the tailscale server.
+func (b shutdownBudget) logoutDeadline() time.Time { return b.deadline.Add(-b.reserve / 4) }
+
+// connTracker tracks the connections being proxied so shutdown can wait for
+// them to finish, and close them if they don't.
+type connTracker struct {
+	wg    sync.WaitGroup
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
+	// ctx is passed to the handlers and cancelled by closeAll.
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// init sets up t on first use. t.mu must be held.
+func (t *connTracker) init() {
+	if t.conns == nil {
+		t.conns = make(map[net.Conn]struct{})
+		t.ctx, t.cancel = context.WithCancel(context.Background())
+	}
+}
+
+// goHandle runs f in a new goroutine, tracking c as an open connection until
+// f returns. f's context is cancelled by closeAll.
+func (t *connTracker) goHandle(c net.Conn, f func(ctx context.Context)) {
+	t.mu.Lock()
+	t.init()
+	t.conns[c] = struct{}{}
+	ctx := t.ctx
+	t.mu.Unlock()
 	t.wg.Go(func() {
-		defer t.n.Add(-1)
-		f()
+		defer func() {
+			t.mu.Lock()
+			delete(t.conns, c)
+			t.mu.Unlock()
+		}()
+		f(ctx)
 	})
 }
 
 // active returns the number of open connections.
-func (t *connTracker) active() int64 { return t.n.Load() }
+func (t *connTracker) active() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.conns)
+}
+
+// closeAll closes all open connections and cancels the handlers' context,
+// which also aborts the ones still connecting to their destination.
+func (t *connTracker) closeAll() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.init()
+	t.cancel()
+	for c := range t.conns {
+		c.Close()
+	}
+}
 
 // wait waits up to timeout for all connections to finish and reports
 // whether they did.
@@ -219,9 +308,10 @@ func (t *connTracker) wait(timeout time.Duration) bool {
 // shutdown disconnects from the tailnet. Ephemeral nodes log out first so the
 // control server removes them right away; otherwise the device lingers until
 // it times out and a restarted proxy gets a suffixed name like "plex-1".
-func shutdown(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server) {
+// Logging out gives up at logoutDeadline.
+func shutdown(logger *slog.Logger, cfg *serveConfig, srv *tsnet.Server, logoutDeadline time.Time) {
 	if cfg.ephemeral() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithDeadline(context.Background(), logoutDeadline)
 		defer cancel()
 		if lc, err := srv.LocalClient(); err != nil {
 			logger.Warn("Can't get tailscale local client to log out", "error", err)
@@ -266,6 +356,6 @@ func serve(ctx context.Context, logger *slog.Logger, ln net.Listener, dial dialF
 		}
 		delay = 0
 		thisLogger := logger.With("source", conn.RemoteAddr().String())
-		conns.goHandle(func() { handleConn(thisLogger, conn, dial) })
+		conns.goHandle(conn, func(ctx context.Context) { handleConn(ctx, thisLogger, conn, dial) })
 	}
 }

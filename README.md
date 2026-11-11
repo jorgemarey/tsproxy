@@ -115,4 +115,12 @@ Like the regular Tailscale client, tsproxy uploads its Tailscale logs to Tailsca
 
 On startup the proxy waits for the device to connect to the tailnet before listening, and exits if that takes longer than `-up-timeout` (1 minute by default, `0` to wait forever), so a wrong authkey or an unreachable control server fails right away.
 
-On `SIGINT` or `SIGTERM` it stops accepting connections and waits up to `-shutdown-timeout` (5 seconds by default) for open connections to finish before leaving the tailnet. A second signal exits immediately.
+On `SIGINT` or `SIGTERM` it stops accepting connections and shuts down within `-shutdown-timeout` (5 seconds by default), counted from the signal:
+
+1. Open connections get until 1 second before the timeout to finish (half of the timeout, if it's shorter than 2 seconds).
+2. The ones still open are closed. Long-lived connections, like HTTP keep-alive or streaming, usually don't finish on their own, so they end here.
+3. The device leaves the tailnet (ephemeral devices log out, so they are removed right away) with the time left.
+
+Set `-shutdown-timeout` below the time your supervisor waits before killing the process (`docker stop`: 10s, Kubernetes `terminationGracePeriodSeconds`: 30s, Nomad `kill_timeout`: 5s, systemd `TimeoutStopSec`). Otherwise the process can be killed before it leaves the tailnet, and an ephemeral device stays in the tailnet until the control server removes it. With Nomad's default, use `-shutdown-timeout 4s` or raise `kill_timeout`.
+
+If the shutdown hasn't finished by the timeout, for example because closing the Tailscale connection hangs, the process exits with status 1. A second signal exits immediately.

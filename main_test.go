@@ -136,7 +136,10 @@ func TestParseArgs(t *testing.T) {
 func TestConnTrackerWait(t *testing.T) {
 	var conns connTracker
 	release := make(chan struct{})
-	conns.goHandle(func() { <-release })
+	c, peer := net.Pipe()
+	defer c.Close()
+	defer peer.Close()
+	conns.goHandle(c, func(context.Context) { <-release })
 
 	if n := conns.active(); n != 1 {
 		t.Fatalf("active() = %d, want 1", n)
@@ -150,5 +153,30 @@ func TestConnTrackerWait(t *testing.T) {
 	}
 	if n := conns.active(); n != 0 {
 		t.Fatalf("active() = %d, want 0", n)
+	}
+}
+
+func TestShutdownBudget(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		timeout            time.Duration
+		wantDrain, wantOut time.Duration // after start
+	}{
+		{timeout: 5 * time.Second, wantDrain: 4 * time.Second, wantOut: 4750 * time.Millisecond},
+		{timeout: 30 * time.Second, wantDrain: 29 * time.Second, wantOut: 29750 * time.Millisecond},
+		// Short timeouts keep half for leaving the tailnet.
+		{timeout: time.Second, wantDrain: 500 * time.Millisecond, wantOut: 875 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		b := newShutdownBudget(start, tt.timeout)
+		if got := b.drainDeadline().Sub(start); got != tt.wantDrain {
+			t.Errorf("timeout %s: drain deadline after %s, want %s", tt.timeout, got, tt.wantDrain)
+		}
+		if got := b.logoutDeadline().Sub(start); got != tt.wantOut {
+			t.Errorf("timeout %s: logout deadline after %s, want %s", tt.timeout, got, tt.wantOut)
+		}
+		if b.deadline.Sub(start) != tt.timeout {
+			t.Errorf("timeout %s: deadline after %s", tt.timeout, b.deadline.Sub(start))
+		}
 	}
 }

@@ -12,7 +12,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`-shutdown-timeout` is the total time to shut down**, counted from the signal. Before, it was only how long open connections could take to finish, followed by up to 5 more seconds to log out. Now open connections get until 1s before the timeout, and logging out uses the time left, so the proxy leaves the tailnet before a supervisor with a longer kill timeout kills it. It must be greater than 0, and the process exits with status 1 if the shutdown takes longer.
 - **Error messages** for mappings listening on the tailnet start with `tailnet mapping` instead of `mapping`, like `local mapping` for `-local`.
+
+### Fixed
+
+- **Shutdown warnings.** Connections still open at the end of `-shutdown-timeout` weren't closed by the proxy, but cut when it left the tailnet. That logged an "Unexpected error when forwarding data" warning for each one. They are now closed before leaving the tailnet, connections still dialing their destination are cancelled, and forwarding errors after that are only logged at `debug`.
 
 ## [0.2.0] - 2026-11-11
 
